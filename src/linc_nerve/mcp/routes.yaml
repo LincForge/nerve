@@ -1,0 +1,25 @@
+# Deep-link route registry for nerve_navigate.
+#
+# Maps app_id -> {package, routes{route_id: deep-link URI}}. nerve_navigate
+# resolves (app_id, route_id) to a URI and hands it to nerve_launch.
+#
+# Override the whole file by setting NERVE_ROUTES_FILE=/abs/path/to/routes.yaml.
+# If this file (or the override) is missing or unparseable, navigation_tools
+# falls back to the hardcoded _FALLBACK_APPS dict — which mirrors this file, so
+# keep the two in sync. Full linc-manifest adoption is a separate step (goal
+# adb40f83 step 2).
+apps:
+  precisionlevel:
+    package: com.lincmobile.level
+    routes:
+      home: precisionlevel://screen/home
+      level: precisionlevel://screen/level
+      calibration: precisionlevel://screen/calibration
+      settings: precisionlevel://screen/settings
+  sniperpulse:
+    package: com.lincmobile.sniperpulse
+    routes:
+      home: sniperpulse://screen/home
+      session_detail: sniperpulse://screen/session_detail
+      history: sniperpulse://screen/history
+      settings: sniperpulse://screen/settings

@@ -1,0 +1,982 @@
+{
+  "nerve_actionlog_start": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      },
+      "target_package": {
+        "default": "",
+        "title": "Target Package",
+        "type": "string"
+      },
+      "meta_json": {
+        "default": "{}",
+        "title": "Meta Json",
+        "type": "string"
+      },
+      "allow_packages": {
+        "default": "",
+        "title": "Allow Packages",
+        "type": "string"
+      },
+      "deny_words": {
+        "default": "",
+        "title": "Deny Words",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device",
+      "path"
+    ],
+    "title": "_nerve_actionlog_start_syncArguments",
+    "type": "object"
+  },
+  "nerve_actionlog_stop": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_actionlog_stop_syncArguments",
+    "type": "object"
+  },
+  "nerve_apps": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_apps_syncArguments",
+    "type": "object"
+  },
+  "nerve_capabilities": {
+    "properties": {},
+    "title": "_nerve_capabilities_syncArguments",
+    "type": "object"
+  },
+  "nerve_clear_app_data": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "package": {
+        "title": "Package",
+        "type": "string"
+      },
+      "confirm": {
+        "default": false,
+        "title": "Confirm",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device",
+      "package"
+    ],
+    "title": "_nerve_clear_app_data_syncArguments",
+    "type": "object"
+  },
+  "nerve_density": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_density_syncArguments",
+    "type": "object"
+  },
+  "nerve_device_state": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "action": {
+        "title": "Action",
+        "type": "string"
+      },
+      "package": {
+        "default": "",
+        "title": "Package",
+        "type": "string"
+      },
+      "bucket": {
+        "default": "",
+        "title": "Bucket",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device",
+      "action"
+    ],
+    "title": "_nerve_device_state_syncArguments",
+    "type": "object"
+  },
+  "nerve_diff": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_diff_syncArguments",
+    "type": "object"
+  },
+  "nerve_discover": {
+    "properties": {},
+    "title": "_nerve_discover_syncArguments",
+    "type": "object"
+  },
+  "nerve_elements": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "diff_only": {
+        "default": false,
+        "title": "Diff Only",
+        "type": "boolean"
+      },
+      "scroll_depth": {
+        "default": 0,
+        "title": "Scroll Depth",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_elements_syncArguments",
+    "type": "object"
+  },
+  "nerve_emulator_list": {
+    "properties": {},
+    "title": "_nerve_emulator_list_syncArguments",
+    "type": "object"
+  },
+  "nerve_emulator_start": {
+    "properties": {
+      "name_or_id": {
+        "title": "Name Or Id",
+        "type": "string"
+      },
+      "snapshot": {
+        "default": "",
+        "title": "Snapshot",
+        "type": "string"
+      },
+      "headless": {
+        "default": false,
+        "title": "Headless",
+        "type": "boolean"
+      },
+      "timeout": {
+        "default": 120,
+        "title": "Timeout",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "name_or_id"
+    ],
+    "title": "_nerve_emulator_start_syncArguments",
+    "type": "object"
+  },
+  "nerve_emulator_stop": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_emulator_stop_syncArguments",
+    "type": "object"
+  },
+  "nerve_ensure_ready": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "require_network": {
+        "default": false,
+        "title": "Require Network",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_ensure_ready_syncArguments",
+    "type": "object"
+  },
+  "nerve_extract_frames": {
+    "properties": {
+      "video_path": {
+        "title": "Video Path",
+        "type": "string"
+      },
+      "timestamps": {
+        "title": "Timestamps",
+        "type": "string"
+      },
+      "out_dir": {
+        "default": "",
+        "title": "Out Dir",
+        "type": "string"
+      }
+    },
+    "required": [
+      "video_path",
+      "timestamps"
+    ],
+    "title": "_nerve_extract_frames_syncArguments",
+    "type": "object"
+  },
+  "nerve_grant_permission": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "package": {
+        "title": "Package",
+        "type": "string"
+      },
+      "permission": {
+        "title": "Permission",
+        "type": "string"
+      },
+      "confirm": {
+        "default": false,
+        "title": "Confirm",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device",
+      "package",
+      "permission"
+    ],
+    "title": "_nerve_grant_permission_syncArguments",
+    "type": "object"
+  },
+  "nerve_inject_sensor": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "sensor_type": {
+        "default": "acceleration",
+        "title": "Sensor Type",
+        "type": "string"
+      },
+      "x": {
+        "default": 0.0,
+        "title": "X",
+        "type": "number"
+      },
+      "y": {
+        "default": 0.0,
+        "title": "Y",
+        "type": "number"
+      },
+      "z": {
+        "default": 9.81,
+        "title": "Z",
+        "type": "number"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_inject_sensor_syncArguments",
+    "type": "object"
+  },
+  "nerve_inspect": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "package": {
+        "title": "Package",
+        "type": "string"
+      },
+      "lines": {
+        "default": 50,
+        "title": "Lines",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "device",
+      "package"
+    ],
+    "title": "_nerve_inspect_syncArguments",
+    "type": "object"
+  },
+  "nerve_install": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "path": {
+        "title": "Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device",
+      "path"
+    ],
+    "title": "_nerve_install_syncArguments",
+    "type": "object"
+  },
+  "nerve_key": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "key": {
+        "title": "Key",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device",
+      "key"
+    ],
+    "title": "_nerve_key_syncArguments",
+    "type": "object"
+  },
+  "nerve_kill": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "package": {
+        "title": "Package",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device",
+      "package"
+    ],
+    "title": "_nerve_kill_syncArguments",
+    "type": "object"
+  },
+  "nerve_launch": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "package": {
+        "title": "Package",
+        "type": "string"
+      },
+      "uri": {
+        "default": "",
+        "title": "Uri",
+        "type": "string"
+      },
+      "extras": {
+        "anyOf": [
+          {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Extras"
+      }
+    },
+    "required": [
+      "device",
+      "package"
+    ],
+    "title": "_nerve_launch_syncArguments",
+    "type": "object"
+  },
+  "nerve_logcat": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "lines": {
+        "default": 50,
+        "title": "Lines",
+        "type": "integer"
+      },
+      "tag": {
+        "default": "",
+        "title": "Tag",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_logcat_syncArguments",
+    "type": "object"
+  },
+  "nerve_long_press": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "x": {
+        "title": "X",
+        "type": "integer"
+      },
+      "y": {
+        "title": "Y",
+        "type": "integer"
+      },
+      "duration_ms": {
+        "default": 500,
+        "title": "Duration Ms",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "device",
+      "x",
+      "y"
+    ],
+    "title": "_nerve_long_press_syncArguments",
+    "type": "object"
+  },
+  "nerve_metrics": {
+    "properties": {
+      "command": {
+        "default": "",
+        "title": "Command",
+        "type": "string"
+      },
+      "last_n": {
+        "default": 20,
+        "title": "Last N",
+        "type": "integer"
+      },
+      "device": {
+        "default": "",
+        "title": "Device",
+        "type": "string"
+      },
+      "package": {
+        "default": "",
+        "title": "Package",
+        "type": "string"
+      }
+    },
+    "title": "_nerve_metrics_syncArguments",
+    "type": "object"
+  },
+  "nerve_navigate": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "app_id": {
+        "title": "App Id",
+        "type": "string"
+      },
+      "route_id": {
+        "title": "Route Id",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device",
+      "app_id",
+      "route_id"
+    ],
+    "title": "_nerve_navigate_syncArguments",
+    "type": "object"
+  },
+  "nerve_navigate_screenshot": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "app_id": {
+        "title": "App Id",
+        "type": "string"
+      },
+      "route_id": {
+        "title": "Route Id",
+        "type": "string"
+      },
+      "settle_ms": {
+        "default": 500,
+        "title": "Settle Ms",
+        "type": "integer"
+      },
+      "annotate": {
+        "default": false,
+        "title": "Annotate",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device",
+      "app_id",
+      "route_id"
+    ],
+    "title": "_nerve_navigate_screenshot_syncArguments",
+    "type": "object"
+  },
+  "nerve_network": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "probe": {
+        "default": false,
+        "title": "Probe",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_network_syncArguments",
+    "type": "object"
+  },
+  "nerve_pool": {
+    "properties": {},
+    "title": "_nerve_pool_syncArguments",
+    "type": "object"
+  },
+  "nerve_record_fixed": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "duration_seconds": {
+        "default": 15,
+        "title": "Duration Seconds",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_record_fixed_syncArguments",
+    "type": "object"
+  },
+  "nerve_record_start": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_record_start_syncArguments",
+    "type": "object"
+  },
+  "nerve_record_stop": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_record_stop_syncArguments",
+    "type": "object"
+  },
+  "nerve_release": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "owner": {
+        "default": "",
+        "title": "Owner",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_release_syncArguments",
+    "type": "object"
+  },
+  "nerve_replay": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "log_path": {
+        "title": "Log Path",
+        "type": "string"
+      },
+      "step_timeout_s": {
+        "default": 10.0,
+        "title": "Step Timeout S",
+        "type": "number"
+      },
+      "secrets_env": {
+        "default": "",
+        "title": "Secrets Env",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device",
+      "log_path"
+    ],
+    "title": "_nerve_replay_syncArguments",
+    "type": "object"
+  },
+  "nerve_reserve": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "purpose": {
+        "default": "",
+        "title": "Purpose",
+        "type": "string"
+      },
+      "timeout_seconds": {
+        "default": 300,
+        "title": "Timeout Seconds",
+        "type": "integer"
+      },
+      "owner": {
+        "default": "",
+        "title": "Owner",
+        "type": "string"
+      },
+      "takeover": {
+        "default": false,
+        "title": "Takeover",
+        "type": "boolean"
+      },
+      "owner_pid": {
+        "default": 0,
+        "title": "Owner Pid",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_reserve_syncArguments",
+    "type": "object"
+  },
+  "nerve_screenshot": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "skip_if_unchanged": {
+        "default": false,
+        "title": "Skip If Unchanged",
+        "type": "boolean"
+      },
+      "full_resolution": {
+        "default": false,
+        "title": "Full Resolution",
+        "type": "boolean"
+      },
+      "annotate": {
+        "default": false,
+        "title": "Annotate",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_screenshot_syncArguments",
+    "type": "object"
+  },
+  "nerve_session_stats": {
+    "properties": {},
+    "title": "_nerve_session_stats_syncArguments",
+    "type": "object"
+  },
+  "nerve_state": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "track_changes": {
+        "default": false,
+        "title": "Track Changes",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_state_syncArguments",
+    "type": "object"
+  },
+  "nerve_stream_logs": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "filter_str": {
+        "default": "",
+        "title": "Filter Str",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_stream_logs_syncArguments",
+    "type": "object"
+  },
+  "nerve_stream_screenshot": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "inline": {
+        "default": false,
+        "title": "Inline",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_stream_screenshot_syncArguments",
+    "type": "object"
+  },
+  "nerve_stream_start": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "max_size": {
+        "default": 1080,
+        "title": "Max Size",
+        "type": "integer"
+      },
+      "max_fps": {
+        "default": 10,
+        "title": "Max Fps",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_stream_start_syncArguments",
+    "type": "object"
+  },
+  "nerve_stream_status": {
+    "properties": {},
+    "title": "_nerve_stream_status_syncArguments",
+    "type": "object"
+  },
+  "nerve_stream_stop": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      }
+    },
+    "required": [
+      "device"
+    ],
+    "title": "_nerve_stream_stop_syncArguments",
+    "type": "object"
+  },
+  "nerve_swipe": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "start_x": {
+        "title": "Start X",
+        "type": "integer"
+      },
+      "start_y": {
+        "title": "Start Y",
+        "type": "integer"
+      },
+      "end_x": {
+        "title": "End X",
+        "type": "integer"
+      },
+      "end_y": {
+        "title": "End Y",
+        "type": "integer"
+      },
+      "duration_ms": {
+        "default": 300,
+        "title": "Duration Ms",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "device",
+      "start_x",
+      "start_y",
+      "end_x",
+      "end_y"
+    ],
+    "title": "_nerve_swipe_syncArguments",
+    "type": "object"
+  },
+  "nerve_tap": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "x": {
+        "title": "X",
+        "type": "integer"
+      },
+      "y": {
+        "title": "Y",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "device",
+      "x",
+      "y"
+    ],
+    "title": "_nerve_tap_syncArguments",
+    "type": "object"
+  },
+  "nerve_type": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "text": {
+        "title": "Text",
+        "type": "string"
+      },
+      "secret": {
+        "default": false,
+        "title": "Secret",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device",
+      "text"
+    ],
+    "title": "_nerve_type_syncArguments",
+    "type": "object"
+  },
+  "nerve_uninstall": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "package": {
+        "title": "Package",
+        "type": "string"
+      },
+      "confirm": {
+        "default": false,
+        "title": "Confirm",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device",
+      "package"
+    ],
+    "title": "_nerve_uninstall_syncArguments",
+    "type": "object"
+  },
+  "nerve_usage_stats": {
+    "properties": {
+      "server": {
+        "default": "",
+        "title": "Server",
+        "type": "string"
+      },
+      "since_hours": {
+        "default": 0.0,
+        "title": "Since Hours",
+        "type": "number"
+      },
+      "include_rotated": {
+        "default": false,
+        "title": "Include Rotated",
+        "type": "boolean"
+      },
+      "top_n": {
+        "default": 50,
+        "title": "Top N",
+        "type": "integer"
+      }
+    },
+    "title": "_nerve_usage_stats_syncArguments",
+    "type": "object"
+  }
+}

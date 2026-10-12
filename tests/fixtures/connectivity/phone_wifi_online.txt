@@ -1,0 +1,32 @@
+NetworkProviders for:
+  3: VcnNetworkProvider
+  9: RestrictedWifiNetworkFactory
+  5: VpnNetworkProvider:0
+  7: WifiNetworkFactory
+  8: UntrustedWifiNetworkFactory
+  4: L2capNetworkProvider
+  1: EthernetNetworkFactory
+  2: WIFI_AWARE_FACTORY
+  11: MultiInternetWifiNetworkFactory
+  6: TelephonyNetworkProvider
+  10: OemPaidWifiNetworkFactory
+
+Active default network: 100
+
+Current network preferences: 
+  Default requests:
+    Request: [uid/pid:1000/3198] - Satisfier: [100] Preference order: 40 Tracked UIDs: {10121-10121, 10224-10224, 10268-10268, 10287-10287, 10348-10348, 10352-10352}
+    Request: [uid/pid:1000/3198] - Satisfier: [100] Preference order: 40 Tracked UIDs: {10267-10267}
+
+Current Networks:
+  NetworkAgentInfo{network{100}  handle{432902426637}  ni{WIFI CONNECTED extra: } created=2026-09-26T19:49:56.683Z Score(Policies : TRANSPORT_PRIMARY&EVER_EVALUATED&IS_UNMETERED&EVER_VALIDATED&IS_VALIDATED ; KeepConnected : 0)  created 37672 firstValidated 38333 lastValidated 38333  lp{{InterfaceName: wlan0 LinkAddresses: [ <redacted-ip>/64,<redacted-ip>/24 ] DnsAddresses: [ /<redacted-ip> ] Domains: lan MTU: 0 ServerAddress: /<redacted-ip> TcpBufferSizes: 2097152,4194304,16777216,2097152,4194304,8388608 Routes: [ <redacted-ip>/64 -> :: wlan0 mtu 0,<redacted-ip>/24 -> 0.0.0.0 wlan0 mtu 0,0.0.0.0/0 -> <redacted-ip> wlan0 mtu 0 ]}}  nc{[ Transports: WIFI Capabilities: NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED LinkUpBandwidth>=12643Kbps LinkDnBandwidth>=80141Kbps Specifier: <WifiNetworkAgentSpecifier [WifiConfiguration=, SSID="<redacted-ssid>", BSSID=<redacted-mac>, band=2, mMatchLocalOnlySpecifiers=false]> TransportInfo: <SSID: "<redacted-ssid>", BSSID: <redacted-mac>, MAC: <redacted-mac>, IP: /<redacted-ip>, Security type: 4, Supplicant state: COMPLETED, Wi-Fi standard: 11ax, RSSI: -53, Link speed: 432Mbps, Tx Link speed: 432Mbps, Max Supported Tx Link speed: 1200Mbps, Rx Link speed: 720Mbps, Max Supported Rx Link speed: 1200Mbps, Frequency: 5765MHz, Net ID: 0, Metered hint: false, score: 60, isUsable: true, CarrierMerged: false, SubscriptionId: -1, IsPrimary: 1, Trusted: true, Restricted: false, Ephemeral: false, OEM paid: false, OEM private: false, OSU AP: false, FQDN: <none>, Provider friendly name: <none>, Requesting package name: <none>"<redacted-ssid>"wpa3-saeMLO Information: , Is TID-To-Link negotiation supported by the AP: false, AP MLD Address: <none>, AP MLO Link Id: <none>, AP MLO Affiliated links: <none>, Vendor Data: <none>> SignalStrength: -53 OwnerUid: 1000 AdminUids: [1000] SSID: "<redacted-ssid>" UnderlyingNetworks: Null]}  factorySerialNumber=7}
+    Nat464Xlat:
+      <not started>
+    Requests: REQUEST:12 LISTEN:129 BACKGROUND_REQUEST:0 total:141
+      NetworkRequest [ REQUEST id=1, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+      NetworkRequest [ LISTEN id=5, [ Capabilities: FOREGROUND RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+      NetworkRequest [ TRACK_SYSTEM_DEFAULT id=6, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&NOT_VCN_MANAGED&NOT_BANDWIDTH_CONSTRAINED RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+    Inactivity Timers:
+
+Status for known UIDs:
+  UID=10154 blockedReasons=40

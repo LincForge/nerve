@@ -1,0 +1,1 @@
+	spawn type = adaptive (6)

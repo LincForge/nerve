@@ -1,0 +1,35 @@
+NetworkProviders for:
+  1: COMPANION_PROXY
+  10: OemPaidWifiNetworkFactory
+  11: MultiInternetWifiNetworkFactory
+  4: VpnNetworkProvider:0
+  9: RestrictedWifiNetworkFactory
+  3: VcnNetworkProvider
+  6: TelephonyNetworkFactory[0]
+  5: PhoneSwitcherNetworkRequstListener
+  2: WEAR_NETWORK_OBSERVER
+  8: UntrustedWifiNetworkFactory
+  7: WifiNetworkFactory
+
+Active default network: 231
+
+Current network preferences: 
+  Default requests:
+
+Current Networks:
+  NetworkAgentInfo{network{231}  handle{995543142413}  ni{WIFI CONNECTED extra: } created=2026-09-30T04:34:34.456Z Score(Policies : TRANSPORT_PRIMARY&EVER_EVALUATED&IS_UNMETERED&EVER_VALIDATED&IS_VALIDATED ; KeepConnected : 0)  created 1912628620 firstValidated 1912629044 lastValidated 1912629044  lp{{InterfaceName: wlan0 LinkAddresses: [ <redacted-ip>/64,<redacted-ip>/24 ] DnsAddresses: [ /<redacted-ip> ] Domains: lan MTU: 0 ServerAddress: /<redacted-ip> TcpBufferSizes: 524288,2097152,8388608,262144,524288,4194304 Routes: [ <redacted-ip>/64 -> :: wlan0 mtu 0,<redacted-ip>/24 -> 0.0.0.0 wlan0 mtu 0,0.0.0.0/0 -> <redacted-ip> wlan0 mtu 0 ]}}  nc{[ Transports: WIFI Capabilities: NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED LinkUpBandwidth>=12000Kbps LinkDnBandwidth>=40018Kbps Specifier: <WifiNetworkAgentSpecifier [WifiConfiguration=, SSID="<redacted-ssid>", BSSID=<redacted-mac>, band=1, mMatchLocalOnlySpecifiers=false]> TransportInfo: <SSID: "<redacted-ssid>", BSSID: <redacted-mac>, MAC: <redacted-mac>, IP: /<redacted-ip>, Security type: 4, Supplicant state: COMPLETED, Wi-Fi standard: 4, RSSI: -48, Link speed: 72Mbps, Tx Link speed: 72Mbps, Max Supported Tx Link speed: 72Mbps, Rx Link speed: 6Mbps, Max Supported Rx Link speed: 72Mbps, Frequency: 2412MHz, Net ID: 0, Metered hint: false, score: 60, isUsable: true, CarrierMerged: false, SubscriptionId: -1, IsPrimary: 1, Trusted: true, Restricted: false, Ephemeral: false, OEM paid: false, OEM private: false, OSU AP: false, FQDN: <none>, Provider friendly name: <none>, Requesting package name: <none>"<redacted-ssid>"wpa3-saeMLO Information: , AP MLD Address: <none>, AP MLO Link Id: <none>, AP MLO Affiliated links: <none>> SignalStrength: -48 OwnerUid: 10091 AdminUids: [10091] SSID: "<redacted-ssid>" UnderlyingNetworks: Null]}  factorySerialNumber=7}
+    Nat464Xlat:
+      <not started>
+    Requests: REQUEST:35 LISTEN:20 BACKGROUND_REQUEST:0 total:55
+      NetworkRequest [ REQUEST id=1, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&NOT_VCN_MANAGED RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+    Inactivity Timers:
+  NetworkAgentInfo{network{251}  handle{1081442488333}  ni{COMPANION_PROXY CONNECTED extra: } created=2026-10-05T00:43:09.304Z Score(Policies : EVER_EVALUATED&IS_UNMETERED&EVER_VALIDATED&IS_VALIDATED ; KeepConnected : 0)  created 2330746342 firstValidated 2330747492 lastValidated 2330747492  lp{{InterfaceName: lo LinkAddresses: [ ] DnsAddresses: [ /8.8.8.8,/<redacted-ip> ] UsePrivateDns: true ValidatedPrivateDnsAddresses: [8.8.8.8] Domains: null MTU: 1500 Routes: [ 0.0.0.0/0 -> <redacted-ip> lo mtu 0 ]}}  nc{[ Transports: BLUETOOTH Capabilities: NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED LinkUpBandwidth>=1600Kbps LinkDnBandwidth>=1600Kbps UnderlyingNetworks: Null]}  factorySerialNumber=-1}
+    Nat464Xlat:
+      <not started>
+    Requests: REQUEST:1 LISTEN:12 BACKGROUND_REQUEST:0 total:13
+      NetworkRequest [ LISTEN id=5, [ Capabilities: FOREGROUND RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+      NetworkRequest [ LISTEN id=8, [ Capabilities: FOREGROUND RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+    Inactivity Timers:
+
+Status for known UIDs:
+  UID=10025 blockedReasons=10000

@@ -1,0 +1,17 @@
+NetworkProviders for: VcnNetworkProvider OemPaidWifiNetworkFactory TelephonyNetworkFactory[0] WIFI_AWARE_FACTORY VpnNetworkProvider:0 PhoneSwitcherNetworkRequstListener UntrustedWifiNetworkFactory Ethernet WifiNetworkFactory
+
+Active default network: 100
+
+Current network preferences: 
+  Default requests:
+
+Current Networks:
+  NetworkAgentInfo{network{100}  handle{432902426637}  ni{WIFI CONNECTED extra: } Score(60 ; KeepConnected : 0 ; Policies : TRANSPORT_PRIMARY&EVER_VALIDATED_NOT_AVOIDED_WHEN_BAD&IS_UNMETERED&EVER_USER_SELECTED&IS_VALIDATED)  created everValidated lastValidated explicitlySelected  lp{{InterfaceName: wlan0 LinkAddresses: [ <redacted-ip>/64,<redacted-ip>/24 ] DnsAddresses: [ /<redacted-ip> ] Domains: lan MTU: 0 ServerAddress: /<redacted-ip> TcpBufferSizes: 524288,1048576,4194304,524288,1048576,4194304 Routes: [ <redacted-ip>/64 -> :: wlan0 mtu 0,<redacted-ip>/24 -> 0.0.0.0 wlan0 mtu 0,0.0.0.0/0 -> <redacted-ip> wlan0 mtu 0 ]}}  nc{[ Transports: WIFI Capabilities: NOT_METERED&INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&VALIDATED&NOT_ROAMING&FOREGROUND&NOT_CONGESTED&NOT_SUSPENDED&NOT_VCN_MANAGED LinkUpBandwidth>=12000Kbps LinkDnBandwidth>=77733Kbps Specifier: <WifiNetworkAgentSpecifier [WifiConfiguration=, SSID="<redacted-ssid>", BSSID=<redacted-mac>, band=2, mMatchLocalOnlySpecifiers=false]> TransportInfo: <SSID: "<redacted-ssid>", BSSID: <redacted-mac>, MAC: <redacted-mac>, Security type: 4, Supplicant state: COMPLETED, Wi-Fi standard: 6, RSSI: -50, Link speed: 544Mbps, Tx Link speed: 544Mbps, Max Supported Tx Link speed: 1200Mbps, Rx Link speed: 864Mbps, Max Supported Rx Link speed: 1200Mbps, Frequency: 5765MHz, Net ID: 0, Metered hint: false, score: 60, CarrierMerged: false, SubscriptionId: -1, IsPrimary: 1> SignalStrength: -50 OwnerUid: 1000 AdminUids: [1000] SSID: "<redacted-ssid>" UnderlyingNetworks: Null]}  factorySerialNumber=7}
+    Requests: REQUEST:54 LISTEN:39 BACKGROUND_REQUEST:0 total:93
+      NetworkRequest [ REQUEST id=1, [ Capabilities: INTERNET&NOT_RESTRICTED&TRUSTED&NOT_VPN&NOT_VCN_MANAGED RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+      NetworkRequest [ LISTEN id=5, [ Capabilities: FOREGROUND RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+      NetworkRequest [ LISTEN id=6, [ Transports: WIFI Capabilities: NOT_RESTRICTED&TRUSTED&NOT_VPN&FOREGROUND&NOT_VCN_MANAGED Uid: 1000 RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+      NetworkRequest [ LISTEN id=7, [ Transports: WIFI Capabilities: NOT_RESTRICTED&TRUSTED&NOT_VPN&FOREGROUND&NOT_VCN_MANAGED Uid: 1000 RequestorUid: 1000 RequestorPkg: android UnderlyingNetworks: Null] ]
+Status for known UIDs:
+  
+Network Requests:

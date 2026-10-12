@@ -1,0 +1,6 @@
+LINC Nerve
+Copyright 2026 LINC Innovations LLC
+
+This product bundles scrcpy-server v3.3.4 (src/linc_nerve/vendor/scrcpy-server-v3.3.4),
+Copyright (C) 2018 Genymobile and Copyright (C) 2018-2025 Romain Vimont,
+licensed under the Apache License, Version 2.0 — https://github.com/Genymobile/scrcpy

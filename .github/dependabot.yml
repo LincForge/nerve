@@ -1,0 +1,12 @@
+# public/.github/dependabot.yml — version PRs are unmergeable on a release mirror; security
+# alerts stay on (repo setting) and are handled upstream in the private repo.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule: {interval: monthly}
+    open-pull-requests-limit: 0
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: monthly}
+    open-pull-requests-limit: 0
