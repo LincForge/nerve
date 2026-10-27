@@ -14,7 +14,7 @@ from linc_nerve.mcp._core import device_tool
 
 
 @device_tool
-def _nerve_ensure_ready_sync(device: str, require_network: bool = False) -> dict[str, Any]:
+def _nerve_ensure_ready_sync(device: str = "", require_network: bool = False) -> dict[str, Any]:
     """Ensure a device is awake + unlocked before UI interaction, and report readiness.
 
     Wakes an asleep/dozing Android device (KEYCODE_WAKEUP), dismisses a non-secure
@@ -30,7 +30,7 @@ def _nerve_ensure_ready_sync(device: str, require_network: bool = False) -> dict
         Returns ~60-120 tokens.
 
     Args:
-        device: Device serial.
+        device: Device serial (optional when the caller holds a single reservation).
         require_network: Also gate ``ready`` on a default network with validated
             internet (Android only). Off by default: ``ready``/``reason`` are then
             unchanged and ``network`` is report-only. When on and the device is

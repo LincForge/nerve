@@ -105,6 +105,7 @@ def test_android_controller_launch_missing_package_raises() -> None:
     mock_device.shell.side_effect = [
         "nosdcard,default\n",
         "Error: No activity found\n",
+        "No activities found\n",
         "** No activities found to run, monkey aborted.\n",
     ]
 
@@ -124,6 +125,7 @@ def test_nerve_launch_sync_missing_package_returns_error() -> None:
     mock_device.shell.side_effect = [
         "nosdcard,default\n",
         "Error: No activity found\n",
+        "No activities found\n",
         "** No activities found to run, monkey aborted.\n",
     ]
 
@@ -244,10 +246,28 @@ def test_install_blocked_by_reservation_guard() -> None:
 def _monkey_ctrl(monkey_output: str) -> tuple[AndroidController, MagicMock]:
     """A controller whose launcher resolution fails, so the monkey fallback runs."""
     ctrl = AndroidController()
-    ctrl._resolve_launcher_activity = MagicMock(return_value="")  # type: ignore[method-assign]
+    ctrl._resolve_launcher_activity = MagicMock(return_value=None)  # type: ignore[method-assign]
+    ctrl._query_launcher_activities = MagicMock(return_value=[])  # type: ignore[method-assign]
     shell = MagicMock(return_value=monkey_output)
     ctrl._shell = shell  # type: ignore[method-assign]
     return ctrl, shell
+
+
+def _fake_shell_ctrl(responses: dict[str, str]) -> tuple[AndroidController, list[str]]:
+    """A controller backed by a fake shell that records every command."""
+    ctrl = AndroidController()
+    calls: list[str] = []
+
+    def _shell(serial: str, cmd: str) -> str:
+        assert serial == "ABC"
+        calls.append(cmd)
+        for key, reply in responses.items():
+            if key in cmd:
+                return reply
+        return ""
+
+    ctrl._shell = _shell  # type: ignore[method-assign]
+    return ctrl, calls
 
 
 @pytest.mark.parametrize(
@@ -284,6 +304,128 @@ def test_launch_phone_package_monkey_success_runs_exact_command() -> None:
     shell.assert_called_once_with(
         "ABC", "monkey -p com.present -c android.intent.category.LAUNCHER 1"
     )
+
+
+def test_launch_phone_multiple_launcher_activities_raises_without_monkey() -> None:
+    ctrl, calls = _fake_shell_ctrl(
+        {
+            "getprop": "nosdcard,default\n",
+            "resolve-activity": (
+                "priority=0 preferredOrder=0 match=0x0\n"
+                "android/com.android.internal.app.ResolverActivity\n"
+            ),
+            "query-activities": (
+                "2 activities found:\n"
+                "  com.example/.MainActivity\n"
+                "  com.example/.debug.LabActivity\n"
+            ),
+            "monkey": "Events injected: 1\n",
+        }
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ctrl.launch("ABC", "com.example")
+
+    assert str(exc_info.value) == (
+        "com.example has 2 launcher activities: "
+        "com.example/.MainActivity, com.example/.debug.LabActivity; "
+        "pass activity= to choose one"
+    )
+    assert not any("monkey" in cmd for cmd in calls)
+    assert (
+        "cmd package query-activities --brief -a android.intent.action.MAIN "
+        "-c android.intent.category.LAUNCHER com.example"
+    ) in calls
+
+
+def test_launch_phone_single_queried_activity_starts_component() -> None:
+    ctrl, calls = _fake_shell_ctrl(
+        {
+            "getprop": "nosdcard,default\n",
+            "resolve-activity": (
+                "priority=0 preferredOrder=0 match=0x0\n"
+                "android/com.android.internal.app.ResolverActivity\n"
+            ),
+            "query-activities": "1 activity found:\n  com.example/.MainActivity\n",
+        }
+    )
+
+    ctrl.launch("ABC", "com.example")
+
+    assert [c for c in calls if c.startswith("am start")] == [
+        "am start -n com.example/.MainActivity"
+    ]
+    assert not any("monkey" in cmd for cmd in calls)
+
+
+def test_launch_phone_single_queried_activity_honours_extras() -> None:
+    ctrl, calls = _fake_shell_ctrl(
+        {
+            "getprop": "nosdcard,default\n",
+            "resolve-activity": "android/com.android.internal.app.ResolverActivity\n",
+            "query-activities": "  com.example/.MainActivity\n",
+        }
+    )
+
+    ctrl.launch("ABC", "com.example", extras={"SKIP_CONSENT": True})
+
+    assert [c for c in calls if c.startswith("am start")] == [
+        "am start -n com.example/.MainActivity --ez SKIP_CONSENT true"
+    ]
+
+
+def test_launch_with_explicit_activity_never_queries() -> None:
+    ctrl, calls = _fake_shell_ctrl({})
+
+    ctrl.launch("ABC", "com.example", activity=".X")
+
+    assert calls == ["am start -n com.example/.X"]
+
+
+def test_query_activities_ignores_blank_lines_and_foreign_package() -> None:
+    ctrl, calls = _fake_shell_ctrl(
+        {
+            "getprop": "nosdcard,default\n",
+            "resolve-activity": "android/com.android.internal.app.ResolverActivity\n",
+            "query-activities": (
+                "\n"
+                "   \n"
+                "  com.other/.ForeignActivity\n"
+                "  com.example.other/.AlsoForeign\n"
+                "  com.example/.MainActivity  \n"
+                "\n"
+            ),
+        }
+    )
+
+    ctrl.launch("ABC", "com.example")
+
+    assert [c for c in calls if c.startswith("am start")] == [
+        "am start -n com.example/.MainActivity"
+    ]
+
+
+def test_nerve_launch_sync_multiple_launcher_activities_returns_error() -> None:
+    ctrl, _ = _fake_shell_ctrl(
+        {
+            "getprop": "nosdcard,default\n",
+            "resolve-activity": "android/com.android.internal.app.ResolverActivity\n",
+            "query-activities": (
+                "  com.example/.MainActivity\n  com.example/.debug.LabActivity\n"
+            ),
+        }
+    )
+    ctrl.discover = MagicMock(return_value=[_phone("ABC")])  # type: ignore[method-assign]
+    mcp_mod._android = ctrl
+    mcp_mod._ios = MagicMock()
+    mcp_mod._ios.discover.return_value = []
+
+    result = _nerve_launch_sync("ABC", "com.example")
+
+    assert "error" in result
+    assert result["error"].startswith("Launch failed:")
+    assert "com.example/.MainActivity" in result["error"]
+    assert "com.example/.debug.LabActivity" in result["error"]
 
 
 def test_install_checked_routes_ios_to_ios_controller() -> None:

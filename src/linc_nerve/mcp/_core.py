@@ -11,19 +11,22 @@ import queue
 import tempfile
 import threading
 import time
+from collections.abc import Iterable, Mapping
 from functools import partial, wraps
-from typing import Any
+from typing import Any, BinaryIO
 
 import anyio
 import structlog
+from linc_cli_kit import strict_tools
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.types import ToolAnnotations
 
 from linc_nerve.core import action_log
+from linc_nerve.core import output_retention as _retention
 from linc_nerve.core.android import AndroidController
 from linc_nerve.core.contracts import require
 from linc_nerve.core.device import NerveDevice, Platform
-from linc_nerve.core.device_manager import DeviceManager
+from linc_nerve.core.device_manager import DeviceManager, _resolve_owner
 from linc_nerve.core.emulator import EmulatorManager
 from linc_nerve.core.ios import IOSController
 from linc_nerve.core.metrics import MetricsCollector
@@ -35,6 +38,7 @@ from linc_nerve.mcp._docstring_args import described_signature
 log = structlog.get_logger().bind(domain="device_control")
 
 server = FastMCP("linc-nerve")
+strict_tools(server)
 
 # ---------------------------------------------------------------------------
 # Singletons
@@ -46,6 +50,15 @@ _state_mgr: StateSessionManager | None = None
 _metrics: MetricsCollector | None = None
 _device_mgr: DeviceManager | None = None
 _emulator: EmulatorManager | None = None
+
+_daemon_mode: bool = False
+
+
+def set_daemon_mode(enabled: bool = True) -> None:
+    """Flag that this process is the long-lived nerve daemon."""
+    global _daemon_mode
+    _daemon_mode = enabled
+
 
 # Per-device async semaphores — serialize MCP tool calls per device so
 # concurrent tools don't exhaust ADB's per-device connection capacity.
@@ -79,6 +92,8 @@ _cache_lock = threading.Lock()
 # import, and ``mkdtemp()`` gives an unpredictable, owner-only (0700) directory
 # instead of a shared ``<tmp>/nerve-output`` parent (security review, Info).
 _OUTPUT_DIR: str | None = None
+# Open handle holding the exclusive owner flock on _OUTPUT_DIR for the process lifetime.
+_OUTPUT_LOCK: BinaryIO | None = None
 _output_dir_lock = threading.Lock()
 
 _file_counter = 0
@@ -427,7 +442,14 @@ def _trusted_tree(device: str) -> list[Any] | dict[str, Any]:
 def _guarded_context(
     guard: action_log.GuardConfig, tool_name: str, device: str, call_args: dict[str, Any]
 ) -> tuple[dict[str, str] | None, dict[str, Any] | None]:
-    """(target, label refusal) for a guarded call that activates an element."""
+    """(target, label refusal) for a guarded call that activates an element.
+
+    A touch whose coordinates do not parse is refused before the label check
+    (fail closed), since the element under it cannot be found.
+    """
+    bad_coords = action_log.coordinate_refusal(tool_name, call_args)
+    if bad_coords is not None:
+        return None, bad_coords
     if not action_log.needs_label_check(tool_name, call_args):
         return None, None
     tree = _trusted_tree(device)
@@ -560,6 +582,193 @@ def _call_with_action_log(
         action_log.REGISTRY.append(device, entry, at=t0, rec_started=rec_started)
 
 
+_SWIPE_CANONICAL = ("start_x", "start_y", "end_x", "end_y")
+_SWIPE_ALIAS = ("x1", "y1", "x2", "y2")
+_ALIAS_TOOLS = frozenset({"nerve_key", "nerve_swipe", "nerve_tap"})
+_LAST_GROUNDED_TAP: dict[tuple[str, int, int], dict[str, Any]] = {}
+
+
+def _resolve_tap_prompt(
+    device: str, prompt: str
+) -> tuple[int, int, dict[str, Any]] | dict[str, Any]:
+    """Resolve a semantic visual tap prompt to ``(x, y, meta)`` or an error dict."""
+    from linc_nerve.core import grounding
+
+    dev, platform = _resolve_device(device)
+    if dev is None:
+        return {"error": platform}
+    guard_err = _check_guard(device)
+    if guard_err:
+        return {"error": str(guard_err.get("error") or "Device reserved")}
+    try:
+        api_key = grounding.require_grounding()
+    except Exception as exc:
+        return {"error": str(exc)}
+    ctrl = _get_controller(platform)
+    try:
+        screen_size = ctrl.get_screen_size(device) if hasattr(ctrl, "get_screen_size") else None
+        if not grounding._valid_screen_size(screen_size):
+            return {"error": "Cannot tap by prompt: device screen size is unknown"}
+        png_bytes = ctrl.screenshot(device)
+        targets = grounding.ground_visual_targets(
+            png_bytes, prompt, screen_size=screen_size, api_key=api_key
+        )
+    except Exception as exc:
+        return {"error": f"Visual grounding failed: {grounding.describe_error(exc)}"}
+    top = grounding.select_tap_target(targets)
+    if isinstance(top, str):
+        return {"error": f"{top} for prompt {prompt!r}", "candidates": targets}
+    center = top.get("center") or {}
+    cx, cy = int(center.get("x", -1)), int(center.get("y", -1))
+    meta = {
+        "prompt": prompt,
+        "confidence": top.get("confidence", 0.0),
+        "bounds": top.get("bounds", ""),
+        "source": top.get("source", "sam-3.1"),
+    }
+    return cx, cy, meta
+
+
+def _canonical_tap_args(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Fold a semantic ``prompt`` on ``nerve_tap`` into ``(x, y)`` coordinates."""
+    prompt_raw = kwargs.get("prompt")
+    prompt = prompt_raw.strip() if isinstance(prompt_raw, str) else ""
+    if not prompt:
+        if "prompt" not in kwargs:
+            return dict(kwargs)
+        return {k: v for k, v in kwargs.items() if k != "prompt"}
+    if kwargs.get("x") is not None or kwargs.get("y") is not None:
+        return {
+            "error": "Conflicting tap arguments: pass x/y coordinates or prompt, not both.",
+            "validation_error": True,
+        }
+    device = str(kwargs.get("device") or "")
+    resolved = _resolve_tap_prompt(device, prompt)
+    if isinstance(resolved, dict):
+        session = action_log.REGISTRY.active(device) if device else None
+        if session is not None and session.guard is not None:
+            return {k: v for k, v in kwargs.items() if k != "prompt"}
+        return {**resolved, "prompt": prompt}
+    cx, cy, meta = resolved
+    _LAST_GROUNDED_TAP[(device, cx, cy)] = meta
+    base = {k: v for k, v in kwargs.items() if k != "prompt"}
+    return {**base, "x": cx, "y": cy}
+
+
+def _canonical_key_args(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Fold ``keycode`` into ``key`` or return a validation error dict."""
+    key = kwargs.get("key") or ""
+    keycode = kwargs.get("keycode") or ""
+    if not key and not keycode:
+        return {
+            "error": "Missing key argument: provide 'key' or 'keycode'.",
+            "validation_error": True,
+        }
+    if key and keycode and key != keycode:
+        return {
+            "error": f"Conflicting key arguments: key={key!r} and keycode={keycode!r} differ.",
+            "validation_error": True,
+        }
+    out = {k: v for k, v in kwargs.items() if k != "keycode"}
+    out["key"] = key or keycode
+    return out
+
+
+def _canonical_swipe_args(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Fold ``x1..y2`` into ``start_x..end_y`` or return a validation error dict."""
+    canon_missing = [k for k in _SWIPE_CANONICAL if kwargs.get(k) is None]
+    alias_missing = [k for k in _SWIPE_ALIAS if kwargs.get(k) is None]
+    has_canon = len(canon_missing) < 4
+    has_alias = len(alias_missing) < 4
+    if has_canon and not has_alias and not canon_missing:
+        return {k: v for k, v in kwargs.items() if k not in _SWIPE_ALIAS}
+    if has_alias and not has_canon and not alias_missing:
+        coords = dict(zip(_SWIPE_CANONICAL, (kwargs[k] for k in _SWIPE_ALIAS), strict=True))
+        rest = {
+            k: v for k, v in kwargs.items() if k not in _SWIPE_CANONICAL and k not in _SWIPE_ALIAS
+        }
+        return {**rest, **coords}
+    if has_canon and has_alias:
+        missing = [*canon_missing, *alias_missing]
+        detail = f" (missing: {', '.join(missing)})" if missing else ""
+        return {
+            "error": (
+                "Conflicting swipe coordinates: pass start_x/start_y/end_x/end_y "
+                f"or x1/y1/x2/y2, not both{detail}."
+            ),
+            "validation_error": True,
+        }
+    missing = (
+        canon_missing
+        if has_canon
+        else (alias_missing if has_alias else [*_SWIPE_CANONICAL, *_SWIPE_ALIAS])
+    )
+    return {
+        "error": f"Missing swipe coordinates: {', '.join(missing)}.",
+        "validation_error": True,
+    }
+
+
+def _canonical_input_args(tool_name: str, kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Fold input-tool aliases into canonical kwargs before the guard or action log sees them."""
+    if tool_name == "nerve_key":
+        return _canonical_key_args(kwargs)
+    if tool_name == "nerve_swipe":
+        return _canonical_swipe_args(kwargs)
+    if tool_name == "nerve_tap":
+        return _canonical_tap_args(kwargs)
+    return dict(kwargs)
+
+
+def _with_canonical_input(fn: Any, raw_fn: Any, tool_name: str) -> Any:
+    """Bind and fold input aliases before ``_with_action_log`` / ``_run_in_session``."""
+    if tool_name not in _ALIAS_TOOLS:
+        return fn
+    sig = inspect.signature(raw_fn)
+
+    @wraps(raw_fn)
+    def canonicalized(*args: Any, **kwargs: Any) -> Any:
+        try:
+            call_kwargs = dict(sig.bind(*args, **kwargs).arguments)
+        except TypeError:
+            return fn(*args, **kwargs)
+        bound = _canonical_input_args(tool_name, call_kwargs)
+        if bound.get("validation_error") or "error" in bound:
+            return bound
+        return fn(**bound)
+
+    return canonicalized
+
+
+def _coordinate_error(tool_name: str, call_args: dict[str, Any]) -> dict[str, Any] | None:
+    """A validation error naming the invalid coordinates of a touch call, or None."""
+    bad = action_log.non_integer_coordinates(tool_name, call_args)
+    if not bad:
+        return None
+    shown = ", ".join(f"{name}={call_args.get(name)!r}" for name in bad)
+    msg = f"Invalid coordinates (integers in 0..{action_log.COORDINATE_MAX} required): {shown}"
+    return {"error": msg, "validation_error": True}
+
+
+def _with_coordinate_check(fn: Any, tool_name: str) -> Any:
+    """Refuse a touch tool call whose coordinates are not integers, before *fn* runs.
+
+    Sits inside ``_with_action_log``, so a guarded session refuses first (with a
+    guard line) and every other path — MCP, daemon, CLI, a direct call — still
+    gets a ``validation_error`` instead of a touch at a coordinate nothing checked.
+    """
+    if tool_name not in action_log.COORDINATE_KEYS:
+        return fn
+    sig = inspect.signature(fn)
+
+    @wraps(fn)
+    def checked(*args: Any, **kwargs: Any) -> Any:
+        invalid = _coordinate_error(tool_name, _call_args(sig, args, kwargs))
+        return fn(*args, **kwargs) if invalid is None else invalid
+
+    return checked
+
+
 def _with_action_log(fn: Any, tool_name: str) -> Any:
     """Thin sync wrapper that logs *fn* calls while an action log is active.
 
@@ -584,6 +793,128 @@ def _with_action_log(fn: Any, tool_name: str) -> Any:
     return logged
 
 
+_AUTO_DEVICE_TOOLS: frozenset[str] = frozenset(
+    {
+        "nerve_ensure_ready",
+        "nerve_launch",
+        "nerve_release",
+    }
+)
+
+
+def _is_live_entry(item: Mapping[str, Any]) -> bool:
+    """Return False when a ``pool()`` dict marks the lease expired or owner-dead."""
+    expires = item.get("expires_in_s")
+    if isinstance(expires, int | float) and expires <= 0:
+        return False
+    return item.get("owner_alive") is not False
+
+
+def _reservation_entry(item: Any) -> tuple[str, str]:
+    """Extract ``(serial, owner)`` from a live ``pool()`` dict or ``DeviceReservation``."""
+    if isinstance(item, Mapping):
+        if not _is_live_entry(item):
+            return "", ""
+        serial = item.get("device_serial") or item.get("device") or ""
+        return str(serial), str(item.get("owner", ""))
+    serial = getattr(item, "device_serial", "") or getattr(item, "device", "")
+    return str(serial), str(getattr(item, "owner", ""))
+
+
+def _pick_reserved_device(
+    reservations: Mapping[str, Any] | Iterable[Any],
+    caller: str,
+) -> str | dict[str, Any]:
+    """Return the caller's sole reserved device serial, or an error dict."""
+    items = reservations.values() if isinstance(reservations, Mapping) else reservations
+    held = sorted(
+        {
+            serial
+            for item in items
+            for serial, owner in (_reservation_entry(item),)
+            if serial and owner == caller
+        }
+    )
+    if not caller or not held:
+        return {
+            "error": (
+                "device is required: you hold no reservation; pass device or nerve_reserve first"
+            ),
+            "validation_error": True,
+        }
+    if len(held) == 1:
+        return held[0]
+    serials = ", ".join(held)
+    return {
+        "error": (
+            f"device is required: you hold multiple reservations ({serials}); "
+            "pass device explicitly"
+        ),
+        "devices": held,
+        "validation_error": True,
+    }
+
+
+def _select_auto_device(
+    tool_name: str,
+    bound: dict[str, Any],
+) -> str | dict[str, Any]:
+    """Pick the caller's reserved device for an opted-in tool call."""
+    if _device_mgr is None:
+        _ensure_initialized()
+    device_mgr = require(_device_mgr, "device manager")
+    owner_arg = bound.get("owner", "") if tool_name == "nerve_release" else ""
+    caller = _resolve_owner(
+        owner_arg if isinstance(owner_arg, str) else "",
+        device_mgr.session_id,
+    )
+    return _pick_reserved_device(device_mgr.pool(), caller)
+
+
+def _inject_device_arg(
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    device: str,
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Return ``(args, kwargs)`` with ``device`` populated."""
+    if args:
+        return (device, *args[1:]), kwargs
+    return args, {**kwargs, "device": device}
+
+
+def _resolve_wrapper_device(
+    tool_name: str,
+    sig: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[str | dict[str, Any], bool, tuple[Any, ...], dict[str, Any]]:
+    """Resolve ``device`` for ``device_tool`` wrapper before ``_run_on_device``."""
+    if tool_name not in _AUTO_DEVICE_TOOLS:
+        device = args[0] if args else kwargs["device"]
+        return device, False, args, kwargs
+    bound = _call_args(sig, args, kwargs)
+    raw = bound.get("device")
+    device = raw.strip() if isinstance(raw, str) else ""
+    if device:
+        return device, False, args, kwargs
+    picked = _select_auto_device(tool_name, bound)
+    if isinstance(picked, dict):
+        return picked, False, args, kwargs
+    new_args, new_kwargs = _inject_device_arg(args, kwargs, picked)
+    return picked, True, new_args, new_kwargs
+
+
+def _tag_auto_selected(
+    result: Any,
+    device: str | dict[str, Any],
+    auto_selected: bool,
+) -> Any:
+    """Attach ``device_auto_selected`` and ``device`` when auto-selection ran."""
+    if auto_selected and isinstance(result, dict) and isinstance(device, str):
+        return {**result, "device": device, "device_auto_selected": True}
+    return result
+
+
 def device_tool(fn: Any) -> Any:
     """Register a sync device function as an MCP tool.
 
@@ -595,22 +926,31 @@ def device_tool(fn: Any) -> Any:
     and the daemon import and call it like the original.
     """
     tool_name = _record_tool(fn, "device")
-    logged = _with_action_log(fn, tool_name)
+    sig = inspect.signature(fn)
+    checked = _with_coordinate_check(fn, tool_name)
+    logged = _with_canonical_input(_with_action_log(checked, tool_name), fn, tool_name)
 
     @wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        device = args[0] if args else kwargs["device"]
+        device, auto_selected, call_args, call_kwargs = _resolve_wrapper_device(
+            tool_name, sig, args, kwargs
+        )
         t0 = time.monotonic()
         error_msg = None
         validation_only = False
         try:
-            result = await _run_on_device(device, partial(logged, *args, **kwargs))
+            result = (
+                device
+                if isinstance(device, dict)
+                else await _run_on_device(device, partial(logged, *call_args, **call_kwargs))
+            )
+            result = _tag_auto_selected(result, device, auto_selected)
             if isinstance(result, dict) and "error" in result:
                 error_msg = str(result["error"])
                 validation_only = bool(result.get("validation_error"))
                 return result
             if isinstance(result, dict):
-                result = _apply_agent_image_budget(result, kwargs)
+                result = _apply_agent_image_budget(result, call_kwargs)
                 if _INLINE_IMAGE_KEY in result:
                     return _wrap_inline_image(result)
             return result
@@ -624,7 +964,7 @@ def device_tool(fn: Any) -> Any:
             success = error_msg is None or validation_only
             if _metrics is not None:
                 _metrics.record_tool_call(tool_name, success)
-            log_mcp_call("linc-nerve", tool_name, kwargs, duration_ms, success, error_msg)
+            log_mcp_call("linc-nerve", tool_name, call_kwargs, duration_ms, success, error_msg)
 
     _register_tool(wrapper, fn, tool_name)
     return logged
@@ -690,7 +1030,7 @@ def _init_singletons() -> None:
     if _state_mgr is None:
         _state_mgr = StateSessionManager()
     if _device_mgr is None:
-        _device_mgr = DeviceManager()
+        _device_mgr = DeviceManager(renew_anonymous=not _daemon_mode)
     if _emulator is None:
         _emulator = EmulatorManager()
     atexit.register(_shutdown_cleanup)
@@ -879,8 +1219,24 @@ def _check_guard(serial: str) -> dict[str, str] | None:
 
 
 # ---------------------------------------------------------------------------
-# Output path helper
+# Output path helper + retention & stale-dir sweep
 # ---------------------------------------------------------------------------
+
+# Thin aliases over core/output_retention (kept here so callers/tests can reach them on _core).
+_output_keep = _retention.output_keep
+_output_max_age_s = _retention.output_max_age_s
+_prune_output_dir = _retention.prune_output_dir
+
+
+def _sweep_stale_output_dirs(
+    tmp_root: str | os.PathLike[str],
+    max_age_s: float | None = None,
+    now: float | None = None,
+) -> list[str]:
+    """Remove this user's stale, unlocked ``nerve-output-*`` dirs, never this process's own."""
+    age_limit = float(_output_max_age_s() if max_age_s is None else max_age_s)
+    current_time = time.time() if now is None else float(now)
+    return _retention.sweep_stale_output_dirs(tmp_root, _OUTPUT_DIR, age_limit, current_time)
 
 
 def _next_output_path(serial: str, tool: str, ext: str = "png") -> str:
@@ -891,16 +1247,42 @@ def _next_output_path(serial: str, tool: str, ext: str = "png") -> str:
     """
     global _file_counter
     safe_serial = serial.replace("/", "_").replace(":", "_")
+    out_dir = _output_dir()
     with _counter_lock:
         _file_counter += 1
         counter = _file_counter
-    return os.path.join(_output_dir(), f"{safe_serial}_{counter:04d}_{tool}.{ext}")
+        _prune_output_dir(out_dir, _output_keep())
+    return os.path.join(out_dir, f"{safe_serial}_{counter:04d}_{tool}.{ext}")
+
+
+def _release_output_lock() -> None:
+    """Close the owner-lock handle at exit (the OS would drop the flock anyway)."""
+    if _OUTPUT_LOCK is not None:
+        _OUTPUT_LOCK.close()
+
+
+atexit.register(_release_output_lock)
+
+
+def _output_dir_usable(path: str | None) -> bool:
+    """True if *path* is still this user's real (non-symlink) directory."""
+    return path is not None and _retention.is_owned_output_dir(path, os.getuid()) is not None
 
 
 def _output_dir() -> str:
-    """Return this process's private output dir, creating it on first use."""
-    global _OUTPUT_DIR
+    """Return this process's private, owner-locked output dir, creating it on first use.
+
+    If the dir has vanished (an external ``rm``, or an older nerve's cleanup), a fresh one is
+    created and locked so later spills keep working. Only the first creation sweeps.
+    """
+    global _OUTPUT_DIR, _OUTPUT_LOCK
     with _output_dir_lock:
-        if _OUTPUT_DIR is None:
-            _OUTPUT_DIR = tempfile.mkdtemp(prefix="nerve-output-")
+        if _output_dir_usable(_OUTPUT_DIR):
+            return require(_OUTPUT_DIR, "output dir")
+        first = _OUTPUT_DIR is None
+        if _OUTPUT_LOCK is not None:
+            _OUTPUT_LOCK.close()
+        _OUTPUT_DIR, _OUTPUT_LOCK = _retention.create_locked_output_dir()
+        if first and _retention.sweep_enabled(os.environ):
+            _sweep_stale_output_dirs(tempfile.gettempdir())
         return _OUTPUT_DIR

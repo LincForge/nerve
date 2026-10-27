@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import anyio
 import pytest
+from linc_cli_kit import registry_of
 from linc_cli_kit.testing import assert_cli_parity
+from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
 
 from linc_nerve.cli.main import _registry_server, main
 
@@ -25,5 +28,18 @@ def test_cli_parity() -> None:
     report = assert_cli_parity(
         main, _registry_server(), prefix="nerve_", samples=_OVERRIDE_SAMPLES
     )
-    assert report.tools == 48
+    assert report.tools == 49
     assert report.skipped == 0
+
+
+def test_strict_tools_contract() -> None:
+    """[contract] Every linc-nerve MCP tool forbids extra properties and unknown arguments."""
+    srv = _registry_server()
+    specs = registry_of(srv)
+    assert specs
+    for spec in specs:
+        assert spec.parameters.get("additionalProperties") is False, (
+            f"{spec.name}: missing additionalProperties: false"
+        )
+    with pytest.raises(FastMCPToolError, match="unknown_arg_xyz"):
+        anyio.run(srv.call_tool, "nerve_discover", {"unknown_arg_xyz": 1})

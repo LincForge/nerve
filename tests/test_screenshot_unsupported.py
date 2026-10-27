@@ -11,7 +11,11 @@ from __future__ import annotations
 
 import glob
 import os
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from linc_nerve.core.android import AndroidController
 from linc_nerve.core.device import DeviceType, NerveDevice, Platform
@@ -46,8 +50,13 @@ def _watch() -> NerveDevice:
     )
 
 
-def test_screenshot_not_implemented_returns_unsupported_shape() -> None:
+def test_screenshot_not_implemented_returns_unsupported_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """NotImplementedError -> unsupported dict, no screenshot key, no file written."""
+    # Isolated temp root: _output_dir() must never create in (or sweep) the real $TMPDIR.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(_core, "_OUTPUT_DIR", None)
     _reset_singletons()
     mock_android = MagicMock(spec=AndroidController)
     mock_android.discover.return_value = []

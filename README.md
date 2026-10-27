@@ -3,7 +3,7 @@
 Field-tested device control for AI coding agents — the self-healing tricks we learned keeping a
 physical Android/iOS bench alive, as an MCP server and a plain CLI.
 
-nerve exposes <!-- NERVE:TOOL-COUNT -->48<!-- /NERVE:TOOL-COUNT --> tools — screenshots, the UI
+nerve exposes <!-- NERVE:TOOL-COUNT -->49<!-- /NERVE:TOOL-COUNT --> tools — screenshots, the UI
 element tree, tap/swipe/type, app install/launch, logs, recording — to any MCP client, and the same
 tools as `nerve <tool>` commands that print JSON.
 
@@ -143,6 +143,27 @@ Needs macOS with Xcode. Expect rough edges: WDA always binds port 8100, first st
 simulator and 15–30 s on a physical device, physical devices need code signing, and watchOS is not
 supported.
 
+## Visual grounding (optional, Meta SAM 3.1)
+
+`nerve_ground` and `nerve_tap(prompt=...)` find controls that the UI tree cannot label, such as
+custom canvases or unlabelled icons. They do this by sending the current screenshot to Meta's
+`sam-3.1` model. Grounding is **off by default**, and it needs three things:
+
+```bash
+pip install 'linc-nerve[grounding]'   # adds meta-sam-parser
+export NERVE_GROUNDING=1              # opt in: screenshots are uploaded to api.meta.ai
+export META_AI_API_KEY=...            # or NERVE_KEYCHAIN_SERVICE=<macOS Keychain service>
+```
+
+- **License:** `meta-sam-parser` is distributed under Meta's
+  [SAM License](https://github.com/meta-models/meta-sam), not Apache-2.0. It restricts some fields
+  of use, including ITAR-controlled, military and weapons applications. Read it before you install
+  the extra. Core nerve never imports it.
+- **Privacy:** never enable grounding on a device that shows personal data.
+- **Tap safety:** a prompt tap fires only on one clear match, meaning confidence ≥ 0.5 and at
+  least 0.1 ahead of the next match on a known screen size. Otherwise it taps nothing and returns
+  the candidates.
+
 ## Reference
 
 ### Configuration
@@ -158,6 +179,20 @@ supported.
 | `LINC_NERVE_DAEMON` | `http://127.0.0.1:8111` | Daemon URL that CLI commands call before falling back to in-process |
 | `ANDROID_ADB_SERVER_PORT` / `ADB_SERVER_SOCKET` | `127.0.0.1:5037` | adb server nerve talks to (`ADB_SERVER_SOCKET` as `tcp:<port>` or `tcp:<host>:<port>` wins; loopback hosts only) — isolates nerve from the host's devices |
 | `NERVE_ALLOWED_HOSTS` / `NERVE_ALLOWED_ORIGINS` | *(none)* | Extra Hosts / browser Origins the daemon accepts |
+| `NERVE_GROUNDING` | *(off)* | `1` enables SAM 3.1 visual grounding (`nerve_ground`, `nerve_tap(prompt=...)`, `visual_grounding_hint`); needs the `[grounding]` extra |
+| `META_AI_API_KEY` | *(none)* | Meta API key for grounding (`META_API_KEY` also accepted) |
+| `NERVE_KEYCHAIN_SERVICE` | *(none)* | macOS Keychain service to read the Meta API key from when it is not in the environment |
+| `NERVE_OUTPUT_KEEP` | `200` | Maximum number of output files retained per process `nerve-output-*` temp directory (`0` or invalid falls back to `200`) |
+| `NERVE_OUTPUT_MAX_AGE_S` | `86400` | Maximum age in seconds (`24h` default; `0` or invalid falls back to `86400`) before an idle `nerve-output-*` directory is swept on the next process's first output |
+
+### Output files
+
+Screenshots (`nerve_screenshot`, `nerve_stream_screenshot`, `nerve_navigate_screenshot`), state/diff captures (`nerve_state`, `nerve_diff`), and large `nerve_logcat` dumps are written to a per-process private (`0700`) directory `<temp dir>/nerve-output-<random>/<serial>_<NNNN>_<tool>.<ext>` (under `$TMPDIR` on macOS, `/tmp` on Linux), created lazily on first output and kept on process exit so callers can read returned paths after a CLI invocation finishes:
+
+- **Retention cap:** Each process directory keeps at most `NERVE_OUTPUT_KEEP` (default `200`) `<serial>_<NNNN>_<tool>.<ext>` files, pruning the oldest (by counter, then mtime) before writing a new one.
+- **Owner lock:** Each process holds an exclusive `flock` on `<dir>/.nerve-output.lock` for its lifetime (the OS drops it when the process exits). A directory whose lock is held — or whose lock state cannot be read — is never removed by the sweep or by `nerve cleanup`, however long its process (an idle daemon or MCP server) has gone without writing. If a process's directory is deleted anyway, nerve creates a fresh one on the next output.
+- **Stale sweep:** On the first output directory creation in a process, nerve sweeps `<temp dir>/nerve-output-*` directories owned by the current UID (never following symlinks) that no live process holds and whose newest entry is older than `NERVE_OUTPUT_MAX_AGE_S` seconds (default `86400`). Set `NERVE_OUTPUT_SWEEP=0` to disable it (it is also off under pytest unless `NERVE_OUTPUT_SWEEP=1`).
+- **On-demand cleanup:** `nerve cleanup` removes all current-UID, non-symlink `nerve-output-*` directories in the temp root except those held by a running nerve process and those modified in the last 60 seconds (`nerve cleanup --all` removes the recently modified ones too, never a live process's), printing JSON `{"removed": [...], "skipped": [...], "bytes_freed": N}` (or text with `nerve --human cleanup`).
 
 ### HTTP daemon (optional)
 
@@ -168,7 +203,7 @@ one is running and otherwise run the tool in-process. A few stateful tools (reco
 reservations, `diff`, `session-stats`) need the daemon, and say so instead of answering wrongly.
 
 <!-- NERVE:TOOLS-AUTO-START — generated by `python -m linc_nerve.docs_gen`, do not edit -->
-## MCP Tools (48)
+## MCP Tools (49)
 
 Tools are registered via `@device_tool` (requires a device serial) or `@global_tool` (no device needed) in `src/linc_nerve/mcp/*_tools.py`. This section — including the count — is generated from those registrations by `python -m linc_nerve.docs_gen`; `tests/test_docs_sync.py` fails CI when it is stale. Call `nerve_capabilities` for the per-platform support matrix.
 
@@ -196,13 +231,14 @@ Tools are registered via `@device_tool` (requires a device serial) or `@global_t
 |------|------|-------------|
 | `nerve_diff` | device | Return UI changes since the last nerve_state snapshot on this device |
 | `nerve_elements` | device | Return the UI element tree only (clickable + text widgets) — no image bytes |
+| `nerve_ground` | device | Locate UI controls visually by natural-language concept prompt using Meta SAM 3.1 |
 | `nerve_state` | device | Capture full device state in one call (screenshot + UI elements + foreground) |
 
 ### Navigation
 
 | Tool | Type | Description |
 |------|------|-------------|
-| `nerve_navigate` | device | Navigate to a named screen in an app using its registered deep link |
+| `nerve_navigate` | device | Navigate to a named screen of a REGISTERED app (route registry) by its deep link |
 | `nerve_navigate_screenshot` | device | Navigate to a screen and capture a screenshot after the UI settles |
 
 ### Input
@@ -213,7 +249,7 @@ Tools are registered via `@device_tool` (requires a device serial) or `@global_t
 | `nerve_key` | device | Press a hardware/system key |
 | `nerve_long_press` | device | Long press at screen coordinates |
 | `nerve_swipe` | device | Two-point gesture from one xy coordinate to another — swipe, drag, or scroll |
-| `nerve_tap` | device | Tap a single point on the device display at known x/y coordinates |
+| `nerve_tap` | device | Tap a single point on the device display at known x/y coordinates or by visual prompt |
 | `nerve_type` | device | Type text into the currently focused input field via the soft keyboard |
 
 ### App Management
@@ -303,6 +339,14 @@ Tools are registered via `@device_tool` (requires a device serial) or `@global_t
   rebinding) and any browser Origin, and accepts tool calls only as `application/json`. Every value
   that reaches a device shell is validated or shell-quoted where it is used. Details and how to
   report a vulnerability: [SECURITY.md](https://github.com/LincForge/nerve/blob/main/SECURITY.md).
+
+## Related projects
+
+| Package | Role |
+|---------|------|
+| [`linc-crucible`](https://github.com/LincForge/crucible) | Quality gates, build-and-deploy routing, and visual/a11y baselines (delegates device I/O to nerve) |
+| [`linc-spectra`](https://github.com/LincForge/spectra) | Runtime debugger (Android JDWP via `kotlin-debug-adapter` or zero-config `jdb`; iOS Simulator `lldb-dap`) |
+| [`mobile-agent-bench`](https://github.com/LincForge/mobile-agent-bench) | Pre-registered 600-cell benchmark comparing `nerve + crucible + spectra` against Maestro, `mobile-mcp`, and `agent-device` ([lincforge.com](https://lincforge.com)) |
 
 ## How this repo works
 

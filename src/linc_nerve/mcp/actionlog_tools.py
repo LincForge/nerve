@@ -108,7 +108,8 @@ def _nerve_actionlog_start_sync(
         allow_packages: Comma list of extra packages a guarded session may
             act in (e.g. a login provider).
         deny_words: Comma list of tap labels to refuse; replaces the default
-            list when non-empty.
+            list when non-empty (call again with the same path and
+            target_package to re-arm in place).
 
     Returns:
         Dict with success/serial/path/started_at (plus guarded/
@@ -131,7 +132,7 @@ def _nerve_actionlog_start_sync(
     try:
         info = action_log.REGISTRY.start(device, resolved, meta, guard)
     except action_log.ActionLogError as exc:
-        return {"error": str(exc)}
+        return {"error": str(exc), "hint": action_log.ALREADY_ACTIVE_HINT}
     except OSError as exc:
         return {"error": f"Cannot open action log: {exc}"}
     return {"success": True, "action": "actionlog_start", **info, **_guard_info(guard)}
@@ -141,7 +142,12 @@ def _guard_info(guard: action_log.GuardConfig | None) -> dict[str, Any]:
     """Extra start-result keys for a guarded session (none when unguarded)."""
     if guard is None:
         return {}
-    return {"guarded": True, "allowed_packages": sorted(guard.allowed_packages)}
+    return {
+        "guarded": True,
+        "target_package": guard.target_package,
+        "allowed_packages": sorted(guard.allowed_packages),
+        "deny_words": list(guard.deny_words),
+    }
 
 
 @device_tool

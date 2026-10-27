@@ -70,7 +70,7 @@ def test_every_schema_option_has_help() -> None:
 def test_schema_covers_all_commands_and_options() -> None:
     commands = _schema()["commands"]
     options = sum(len(command["options"]) for command in commands.values())
-    assert (len(commands), options) == (52, 113)
+    assert (len(commands), options) == (54, 127)
 
 
 # ---------------------------------------------------------------------------

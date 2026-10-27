@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
+import re
 import signal
+from collections.abc import Mapping
 from typing import Any
 
 import click
@@ -42,6 +45,7 @@ from linc_nerve.core.android import AndroidController  # noqa: E402
 from linc_nerve.core.ios import IOSController  # noqa: E402
 from linc_nerve.daemon.polling import DeviceDiff, poll_devices  # noqa: E402
 from linc_nerve.daemon.wda_manager import DaemonWDAManager  # noqa: E402
+from linc_nerve.mcp import _core  # noqa: E402
 from linc_nerve.mcp._core import _ensure_initialized  # noqa: E402
 from linc_nerve.mcp.sse_server import (  # noqa: E402
     _get_tool_executor,
@@ -61,11 +65,13 @@ def main() -> None:
 install_globals(main)
 
 
-# Registered via add_command so doctor.py stays importable (and unit-testable)
+# Registered via add_command so doctor.py/cleanup.py stay importable (and unit-testable)
 # without pulling in the controller/daemon imports above.
+from linc_nerve.cli.cleanup import cleanup  # noqa: E402
 from linc_nerve.cli.doctor import doctor  # noqa: E402
 
 main.add_command(doctor)
+main.add_command(cleanup)
 
 
 def _registry_server() -> Any:
@@ -274,6 +280,7 @@ async def run_daemon_async(port: int) -> bool:
         )
         return False
 
+    _core.set_daemon_mode()
     _ensure_initialized()
 
     loop = asyncio.get_event_loop()
@@ -380,6 +387,32 @@ def _local_before() -> None:
     _ensure_initialized()
 
 
+# Grammar for a NERVE_OWNER default owner: one leading alphanumeric, then up to 127 of
+# [A-Za-z0-9_.:@-]. Applied with re.fullmatch (``$`` would accept a trailing newline).
+_OWNER_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}\Z")
+_OWNER_TOOLS = frozenset({"nerve_reserve", "nerve_release"})
+
+
+def _with_default_owner(
+    tool: str, payload: dict[str, Any], env: Mapping[str, str]
+) -> dict[str, Any]:
+    """Fill ``owner`` for reserve/release from ``NERVE_OWNER`` when the caller gave none.
+
+    Without it every owner-less CLI call shares the daemon's one session id, so any
+    caller on the host could renew, take over or release the lease (p0-05). An explicit
+    ``--owner`` always wins. Returns a copy; the input payload is never mutated.
+    """
+    default = env.get("NERVE_OWNER", "")
+    if tool not in _OWNER_TOOLS or payload.get("owner") or not default:
+        return payload
+    if _OWNER_RE.fullmatch(default) is None:
+        raise UsageError(
+            f"NERVE_OWNER={default!r} is not a valid owner: it must match "
+            "[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}"
+        )
+    return {**payload, "owner": default}
+
+
 class NerveTransport(HttpDaemonTransport):
     """HttpDaemonTransport that raises a precise ToolError for nerve's well-known error shapes.
 
@@ -391,9 +424,8 @@ class NerveTransport(HttpDaemonTransport):
     `super().call` (the daemon's HTTP 400 -> kit `UsageError` path).
     """
 
-    def call(
-        self, spec: Any, payload: dict[str, Any], *, timeout: float | None = None
-    ) -> Any:
+    def call(self, spec: Any, payload: dict[str, Any], *, timeout: float | None = None) -> Any:
+        payload = _with_default_owner(spec.name, payload, os.environ)
         try:
             result = super().call(spec, payload, timeout=timeout)
         except ToolError as exc:
@@ -506,11 +538,23 @@ def screenshot(device: str, output: str | None) -> None:
 @main.command()
 @click.argument("device")
 @click.argument("package")
+@click.option(
+    "--uri",
+    default="",
+    help=(
+        "Deep link to open with an Android VIEW intent (e.g. market://details?id=org.example.app "
+        'or https://example.com/path); PACKAGE confines the intent to that app. Pass "" as '
+        "PACKAGE to let the system pick a handler, which may show a chooser."
+    ),
+)
 @_contract
-def launch(device: str, package: str) -> None:
-    """Launch an app on a device. Example: nerve launch SERIAL com.example.app"""
+def launch(device: str, package: str, uri: str = "") -> None:
+    """Launch an app on a device. Example: nerve launch SERIAL com.android.vending --uri 'market://details?id=org.example.app'"""
     ctx = click.get_current_context()
-    res = _call("nerve_launch", {"device": device, "package": package})
+    payload: dict[str, Any] = {"device": device, "package": package}
+    if uri:
+        payload["uri"] = uri
+    res = _call("nerve_launch", payload)
     ctx.exit(_emit(res, tool="launch", renderer=lambda r: f"Launched {package} on {device}"))
 
 
@@ -549,9 +593,28 @@ def tap(device: str, x: int, y: int) -> None:
     ctx.exit(_emit(res, tool="tap", renderer=lambda r: f"Tapped ({x}, {y}) on {device}"))
 
 
+def _is_int_only_union(param_type: Any) -> bool:
+    """A kit union type whose only non-null member is an integer (an ``int | None`` arg)."""
+    members = getattr(param_type, "members", None)
+    return bool(members) and all(m.get("type") == "integer" for m in members)
+
+
+def _type_optional_ints(group: click.Group) -> None:
+    """Give ``int | None`` options click.INT, not the kit's generic VALUE union type.
+
+    linc-cli-kit maps any anyOf union to its VALUE type, so `nerve schema --json`
+    would advertise swipe's --start-x / --x1.. as VALUE rather than INT.
+    """
+    for command in group.commands.values():
+        for param in command.params:
+            if isinstance(param, click.Option) and _is_int_only_union(param.type):
+                param.type = click.INT
+
+
 def _mount() -> None:
     """Reflect every remaining MCP tool onto the group (hand-written commands win)."""
     mount_tools(main, _registry_server(), prefix="nerve_", transport=TRANSPORT)
+    _type_optional_ints(main)
 
 
 _mount()

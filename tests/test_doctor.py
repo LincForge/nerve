@@ -415,3 +415,242 @@ def test_fresh_host_cli_exits_zero_and_still_offers_fix(monkeypatch) -> None:
     home = linc_home()
     assert f"create directories: {home}, {home / 'nerve' / 'recordings'}" in result.output
     assert executed == []
+
+
+# ---------------------------------------------------------------------------
+# Probe-started adb server cleanup + `nerve doctor --human`
+# ---------------------------------------------------------------------------
+
+
+class TestAdbProbeServerHygiene:
+    @staticmethod
+    def _stub_other_probes(monkeypatch) -> None:
+        from linc_nerve.cli import doctor as doctor_mod
+
+        monkeypatch.setattr(doctor_mod, "ADB_PATH", "/sdk/adb")
+        monkeypatch.setattr(doctor_mod.shutil, "which", lambda _p: "/sdk/adb")
+        monkeypatch.setattr(doctor_mod, "_probe_daemon_health", lambda _port: None)
+        monkeypatch.setattr(doctor_mod, "_probe_xcode_clt", lambda: "/Library/Developer/CLT")
+
+    def test_not_listening_issues_adb_kill_server_after_adb_devices(self, monkeypatch) -> None:
+        import subprocess as sp
+
+        from linc_nerve.cli import doctor as doctor_mod
+
+        self._stub_other_probes(monkeypatch)
+        seen_addresses: list[object] = []
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_listening(address: object) -> doctor_mod.AdbProbe:
+            seen_addresses.append(address)
+            assert calls == [], "_adb_server_probe must run BEFORE _probe_adb_devices"
+            return doctor_mod.AdbProbe.REFUSED
+
+        def fake_run(cmd: list[str], **kwargs: object) -> sp.CompletedProcess[str]:
+            calls.append((list(cmd), dict(kwargs)))
+            return sp.CompletedProcess(
+                cmd,
+                0,
+                stdout="List of devices attached\n",
+                stderr="* daemon started successfully\n",
+            )
+
+        monkeypatch.setattr(doctor_mod, "_adb_server_probe", fake_listening)
+        monkeypatch.setattr(doctor_mod.subprocess, "run", fake_run)
+
+        probes = doctor_mod.gather_probes()
+        assert len(seen_addresses) == 1
+        assert probes.adb_server_listening is False
+        assert [c[0] for c in calls] == [
+            ["/sdk/adb", "devices"],
+            ["/sdk/adb", "kill-server"],
+        ]
+        assert calls[1][1].get("timeout") == 10
+        assert calls[1][1].get("capture_output") is True
+        assert calls[1][1].get("text") is True
+        assert calls[1][1].get("check") is False
+
+        adb_check = next(r for r in run_checks(probes) if r.name == "adb")
+        assert adb_check.status == "ok"
+        assert (
+            adb_check.detail
+            == "adb responsive (/sdk/adb) (server started for the check and stopped)"
+        )
+
+    def test_already_listening_issues_no_kill_server(self, monkeypatch) -> None:
+        import subprocess as sp
+
+        from linc_nerve.cli import doctor as doctor_mod
+
+        self._stub_other_probes(monkeypatch)
+        calls: list[list[str]] = []
+
+        monkeypatch.setattr(
+            doctor_mod, "_adb_server_probe", lambda _addr: doctor_mod.AdbProbe.LISTENING
+        )
+
+        def fake_run(cmd: list[str], **_kwargs: object) -> sp.CompletedProcess[str]:
+            calls.append(list(cmd))
+            return sp.CompletedProcess(
+                cmd,
+                0,
+                stdout="List of devices attached\n",
+                stderr="* daemon started successfully\n",
+            )
+
+        monkeypatch.setattr(doctor_mod.subprocess, "run", fake_run)
+
+        probes = doctor_mod.gather_probes()
+        assert probes.adb_server_listening is True
+        assert calls == [["/sdk/adb", "devices"]]
+
+        adb_check = next(r for r in run_checks(probes) if r.name == "adb")
+        assert adb_check.status == "ok"
+        assert adb_check.detail == "adb responsive (/sdk/adb)"
+        assert (
+            check_adb("/sdk/adb", True, "List of devices attached\n").detail
+            == "adb responsive (/sdk/adb)"
+        )
+
+    def test_kill_server_carries_android_adb_server_port_env(self, monkeypatch) -> None:
+        import subprocess as sp
+
+        from linc_nerve.cli import doctor as doctor_mod
+
+        self._stub_other_probes(monkeypatch)
+        monkeypatch.setenv("ANDROID_ADB_SERVER_PORT", "5199")
+        probed_ports: list[int] = []
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_listening(address: object) -> doctor_mod.AdbProbe:
+            probed_ports.append(getattr(address, "port", -1))
+            return doctor_mod.AdbProbe.REFUSED
+
+        def fake_run(cmd: list[str], **kwargs: object) -> sp.CompletedProcess[str]:
+            calls.append((list(cmd), dict(kwargs)))
+            return sp.CompletedProcess(
+                cmd,
+                0,
+                stdout="List of devices attached\n",
+                stderr="* daemon started successfully\n",
+            )
+
+        monkeypatch.setattr(doctor_mod.subprocess, "run", fake_run)
+
+        doctor_mod.gather_probes(listening_probe=fake_listening)
+        assert probed_ports == [5199]
+        assert [c[0] for c in calls] == [
+            ["/sdk/adb", "devices"],
+            ["/sdk/adb", "kill-server"],
+        ]
+        kill_env = calls[1][1].get("env")
+        assert isinstance(kill_env, dict)
+        assert kill_env.get("ANDROID_ADB_SERVER_PORT") == "5199"
+
+    def test_non_executable_adb_skips_devices_and_kill_server(self, monkeypatch) -> None:
+        from linc_nerve.cli import doctor as doctor_mod
+
+        self._stub_other_probes(monkeypatch)
+        monkeypatch.setattr(doctor_mod, "ADB_PATH", "adb")
+        monkeypatch.setattr(doctor_mod.shutil, "which", lambda _p: None)
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            doctor_mod.subprocess,
+            "run",
+            lambda cmd, **_kw: calls.append(list(cmd)),
+        )
+
+        probes = doctor_mod.gather_probes(
+            listening_probe=lambda _addr: doctor_mod.AdbProbe.REFUSED
+        )
+        assert probes.adb_is_executable is False
+        assert probes.adb_devices_output is None
+        assert probes.adb_server_listening is True
+        assert calls == []
+
+    def test_invalid_adb_server_env_reads_unknown_never_refused(self, monkeypatch) -> None:
+        """[contract] An ADB_SERVER_SOCKET nerve rejects is UNKNOWN, so doctor never kills."""
+        from linc_nerve.cli import doctor as doctor_mod
+
+        monkeypatch.setenv("ADB_SERVER_SOCKET", "invalid-spec")
+        result = doctor_mod._probe_adb_listening(lambda _a: doctor_mod.AdbProbe.REFUSED)
+        assert result is doctor_mod.AdbProbe.UNKNOWN
+        assert doctor_mod.should_stop(result, "* daemon started successfully") is False
+
+    def test_stop_probe_started_server_swallows_errors(self, monkeypatch) -> None:
+        from linc_nerve.cli import doctor as doctor_mod
+
+        def boom(*_a: object, **_kw: object) -> None:
+            raise OSError("kill-server failed")
+
+        monkeypatch.setattr(doctor_mod.subprocess, "run", boom)
+        doctor_mod._stop_probe_started_server("/sdk/adb")
+
+    def test_fix_adb_start_server_executes_after_gather_probes(
+        self, monkeypatch
+    ) -> None:
+        import subprocess as sp
+
+        from linc_nerve.cli import doctor as doctor_mod
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kw: object) -> sp.CompletedProcess[str]:
+            calls.append(list(cmd))
+            return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(doctor_mod, "ADB_PATH", "/sdk/adb")
+        monkeypatch.setattr(doctor_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            doctor_mod,
+            "gather_probes",
+            lambda **_kw: _green_probes(adb_devices_output=None),
+        )
+        result = CliRunner().invoke(doctor, ["--fix"])
+        assert result.exit_code == 1
+        assert calls == [["/sdk/adb", "start-server"]]
+
+
+class TestDoctorHumanFlag:
+    def test_doctor_human_flag_via_group_runner(
+        self, monkeypatch, restore_signal_handlers
+    ) -> None:
+        from linc_nerve.cli.main import main
+
+        monkeypatch.setattr(
+            "linc_nerve.cli.doctor.gather_probes", lambda **kw: _green_probes()
+        )
+        plain = CliRunner().invoke(main, ["doctor"])
+        human = CliRunner().invoke(main, ["doctor", "--human"])
+        global_human = CliRunner().invoke(main, ["--human", "doctor"])
+        assert plain.exit_code == 0
+        assert human.exit_code == 0
+        assert global_human.exit_code == 0
+        assert human.output == plain.output
+        assert "all green" in human.output
+
+    def test_doctor_human_flag_exits_one_on_failure(
+        self, monkeypatch, restore_signal_handlers
+    ) -> None:
+        from linc_nerve.cli.main import main
+
+        monkeypatch.setattr(
+            "linc_nerve.cli.doctor.gather_probes",
+            lambda **kw: _green_probes(scrcpy_server_exists=False),
+        )
+        human = CliRunner().invoke(main, ["doctor", "--human"])
+        assert human.exit_code == 1
+        assert "✗" in human.output
+
+    def test_doctor_human_with_json_is_usage_error(
+        self, monkeypatch, restore_signal_handlers
+    ) -> None:
+        from linc_nerve.cli.main import main
+
+        monkeypatch.setattr(
+            "linc_nerve.cli.doctor.gather_probes", lambda **kw: _green_probes()
+        )
+        result = CliRunner().invoke(main, ["doctor", "--human", "--json"])
+        assert result.exit_code == 2
+        assert "--human" in result.output
+        assert "--json" in result.output

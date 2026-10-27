@@ -60,6 +60,46 @@ def _resolve_owner(owner: str, session_id: str) -> str:
     return owner or session_id
 
 
+def _default_owner(owner: str, owner_pid: int, session_id: str) -> str:
+    """The owner ``reserve`` stores: the caller's ``owner`` if given, else
+    ``pid:<owner_pid>`` when the caller named its process, else the session id
+    (today's semantics — under stdio MCP each bellows process has its own
+    DeviceManager, so the session id IS per caller there)."""
+    if owner:
+        return owner
+    if owner_pid > 0:
+        return f"pid:{owner_pid}"
+    return session_id
+
+
+def _has_explicit_identity(owner: str, owner_pid: int) -> bool:
+    """True when the caller named itself — an ``owner`` or an ``owner_pid``.
+    A caller with neither resolves to the shared session id, which every
+    owner-less caller of this process shares."""
+    return bool(owner) or owner_pid > 0
+
+
+def _conflict_refusal(
+    serial: str, held: str, *, takeover: bool, explicit_identity: bool
+) -> str | None:
+    """Refusal for a reserve that hits a live row held by a different owner,
+    or None when an explicit-identity takeover may proceed. Both refusals keep
+    `` is held by `` so cli/errors.py maps them to DEVICE_RESERVED."""
+    if not takeover:
+        return (
+            f"Device '{serial}' is {held}. Wait for release or timeout. If this is "
+            "your own lease, re-run with the same owner to renew it. Do not take "
+            "over a lease you did not create."
+        )
+    if not explicit_identity:
+        return (
+            f"Device '{serial}' is {held}. takeover needs an explicit owner: pass "
+            "owner (CLI --owner, or set NERVE_OWNER) so the lease is not shared by "
+            "every caller of this nerve process."
+        )
+    return None
+
+
 def _owner_mismatch(requested: str, lease_owner: str, session_id: str) -> bool:
     """True when a fenced caller (non-empty ``requested``) is not the lease's
     effective owner. An empty ``requested`` is unfenced — never a mismatch."""
@@ -87,6 +127,12 @@ class DeviceReservation:
     purpose: str
     owner: str
 
+    # Not a dataclass field (no annotation), so the pinned 8-field contract
+    # holds: ``reserve`` sets it True on the instance it returns when the call
+    # renewed this owner's existing lease rather than creating/taking one.
+    renewed = False
+    owner_pid = None
+
 
 class DeviceManager:
     """Manages device reservations across nerve process instances.
@@ -96,8 +142,9 @@ class DeviceManager:
     reserve, release, and guard devices.
     """
 
-    def __init__(self, db_path: Path | None = None) -> None:
+    def __init__(self, db_path: Path | None = None, *, renew_anonymous: bool = True) -> None:
         self._db_path = db_path if db_path is not None else _default_db_path()
+        self.renew_anonymous: bool = renew_anonymous
         self._session_id = uuid.uuid4().hex[:12]
         self._pid = os.getpid()
         self._closed = False
@@ -193,9 +240,14 @@ class DeviceManager:
         ``DeviceManager`` (and therefore one session_id) — without a
         caller-supplied owner, a second lane's reserve() on a live row would
         silently succeed and steal the lease. ``owner`` defaults to this
-        session's id, preserving pre-owner behavior for callers that don't
-        pass one. A live row held by a *different* owner blocks unless
-        ``takeover=True``, which force-claims it.
+        session's id, preserving pre-owner behavior for callers that pass
+        neither ``owner`` nor ``owner_pid``; with only ``owner_pid`` it
+        defaults to ``pid:<owner_pid>``. A live row held by a *different*
+        owner blocks unless ``takeover=True``, which force-claims it — but
+        only for a caller with an explicit identity (``owner`` or
+        ``owner_pid``); an anonymous takeover is refused and the row is left
+        untouched. The returned reservation's ``renewed`` is True when this
+        call renewed the same owner's existing lease.
 
         ``owner_pid`` (0 = not supplied) names the caller's own process. The
         daemon reaps the lease on its tick once that process is gone, and
@@ -208,7 +260,8 @@ class DeviceManager:
         """
         now = time.time()
         stored_owner_pid = owner_pid or None
-        resolved_owner = _resolve_owner(owner, self._session_id)
+        resolved_owner = _default_owner(owner, owner_pid, self._session_id)
+        renewed = False
         with self._lock:
             try:
                 self._conn.execute(
@@ -232,7 +285,7 @@ class DeviceManager:
                 )
                 self._conn.commit()
             except sqlite3.IntegrityError:
-                error = self._claim_existing_reservation(
+                claim = self._claim_existing_reservation(
                     serial,
                     resolved_owner,
                     purpose,
@@ -240,9 +293,11 @@ class DeviceManager:
                     now,
                     takeover,
                     stored_owner_pid,
+                    explicit_identity=_has_explicit_identity(owner, owner_pid),
                 )
-                if error is not None:
-                    return error
+                if isinstance(claim, str):
+                    return claim
+                renewed = claim
 
         logger.info(
             "device_reserved",
@@ -251,7 +306,7 @@ class DeviceManager:
             purpose=purpose,
             owner=resolved_owner,
         )
-        return DeviceReservation(
+        reservation = DeviceReservation(
             device_serial=serial,
             session_id=self._session_id,
             pid=self._pid,
@@ -261,6 +316,9 @@ class DeviceManager:
             purpose=purpose,
             owner=resolved_owner,
         )
+        reservation.renewed = renewed
+        reservation.owner_pid = stored_owner_pid
+        return reservation
 
     def _claim_existing_reservation(
         self,
@@ -271,10 +329,15 @@ class DeviceManager:
         now: float,
         takeover: bool,
         owner_pid: int | None = None,
-    ) -> str | None:
+        *,
+        explicit_identity: bool = True,
+    ) -> str | bool:
         """Handle the INSERT IntegrityError path of ``reserve`` under
         ``self._lock``: update the row in place for an idempotent same-owner
-        reserve or an explicit takeover, or return a refusal string.
+        reserve or an explicit-identity takeover, or return a refusal string.
+
+        Returns the refusal string, else True for a same-owner renewal and
+        False for a takeover.
         """
         row = self._conn.execute(
             "SELECT session_id, purpose, owner, reserved_at "
@@ -288,11 +351,13 @@ class DeviceManager:
         existing_owner = _effective_owner(existing_raw_owner, existing_session_id)
         is_takeover = existing_owner != resolved_owner
 
-        if is_takeover and not takeover:
+        if is_takeover:
             held = _held_by(existing_owner, existing_reserved_at, existing_purpose)
-            return (
-                f"Device '{serial}' is {held}. Wait for release or timeout, or pass takeover=True."
+            refusal = _conflict_refusal(
+                serial, held, takeover=takeover, explicit_identity=explicit_identity
             )
+            if refusal is not None:
+                return refusal
 
         # Idempotent same-owner update and explicit takeover both re-point the
         # row at this session/pid — a same-owner reserve from a *different*
@@ -347,7 +412,7 @@ class DeviceManager:
                 ),
             )
         self._conn.commit()
-        return None
+        return not is_takeover
 
     def release(self, serial: str, *, owner: str = "") -> bool:
         """Release a reservation held by ``owner`` (default: this session's id).
@@ -605,11 +670,12 @@ class DeviceManager:
         rows this manager holds for itself, and rows whose owner_pid is set and
         alive. Caller-owned leases without an owner_pid are NOT renewed here;
         the caller renews by re-reserving. Caller holds ``self._lock``."""
-        self._conn.execute(
-            "UPDATE reservations SET last_heartbeat = ? "
-            "WHERE session_id = ? AND (owner = '' OR owner = session_id)",
-            (now, self._session_id),
-        )
+        if self.renew_anonymous:
+            self._conn.execute(
+                "UPDATE reservations SET last_heartbeat = ? "
+                "WHERE session_id = ? AND (owner = '' OR owner = session_id)",
+                (now, self._session_id),
+            )
         pid_rows = self._conn.execute(
             "SELECT device_serial, owner_pid FROM reservations WHERE owner_pid IS NOT NULL"
         ).fetchall()

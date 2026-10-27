@@ -84,7 +84,7 @@ _ROUTE_REGISTRY, _APP_PACKAGES = _load_route_registry()
 
 @device_tool
 def _nerve_navigate_sync(device: str, app_id: str, route_id: str) -> dict[str, Any]:
-    """Navigate to a named screen in an app using its registered deep link.
+    """Navigate to a named screen of a REGISTERED app (route registry) by its deep link.
 
     USE FOR: Going to a specific screen by name (e.g. "settings", "calibration").
     NOT FOR: Opening arbitrary URIs (use nerve_launch with uri param).
@@ -104,6 +104,11 @@ def _nerve_navigate_sync(device: str, app_id: str, route_id: str) -> dict[str, A
             "error": (f"Unknown app '{app_id}'. Available apps: {', '.join(available_apps)}"),
             "validation_error": True,
             "available_apps": available_apps,
+            "hint": (
+                "nerve_navigate only knows apps listed in its route registry "
+                "(routes.yaml / NERVE_ROUTES_FILE). For any other app use "
+                "nerve_launch(device, package, uri=<deep link>)."
+            ),
         }
     uri = app_routes.get(route_id)
     if uri is None:

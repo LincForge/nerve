@@ -27,6 +27,24 @@ from . import android as _android
 # string starts a second command. ``\Z`` keeps a stray ``.match`` safe too.
 _SAFE_IDENTIFIER_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9_.]*\Z")
 _ACTIVITY_RE = re.compile(r"\A[A-Za-z_.][A-Za-z0-9_.$]*\Z")
+# Deep-link URIs go into ``am start -d`` (Android) and ``simctl openurl`` / WDA
+# ``/url`` (iOS). The grammar is an RFC 3986 scheme followed only by RFC 3986
+# unreserved / reserved / percent characters: no whitespace, no control
+# characters, no quotes other than the sub-delim ``'``, no backslash or
+# backtick. ``&`` is legal, so multi-param deep links pass (finding 7). Applied
+# with ``fullmatch``; ``_q(uri)`` quoting stays as the second layer.
+_URI_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9+.-]*:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+\Z")
+_URI_MAX_LEN = 2048
+
+
+def validate_launch_uri(uri: str) -> None:
+    """Raise ``ValueError`` unless ``uri`` is an RFC 3986-shaped deep link (<= 2048 chars)."""
+    if len(uri) > _URI_MAX_LEN or not _URI_RE.fullmatch(uri):
+        raise ValueError(
+            f"Invalid uri {uri!r}: must be an RFC 3986 URI (scheme ':' then only "
+            f"unreserved/reserved/percent-encoded characters; no whitespace, control "
+            f"characters, quotes, backslash or backtick) of at most {_URI_MAX_LEN} characters"
+        )
 
 
 def _q(token: str) -> str:
@@ -202,6 +220,7 @@ class _AppsMixin:
             _validate_activity(activity)
         extra_flags = self._format_extras(extras)
         if uri:
+            validate_launch_uri(uri)
             self._shell(
                 serial,
                 self._with_extras(
@@ -222,12 +241,23 @@ class _AppsMixin:
     def _launch_phone_package(self, serial: str, package: str, extra_flags: str = "") -> None:
         """Package-only launch on a phone / tablet / emulator.
 
-        Resolve the main launcher activity and ``am start -n`` it; fall back to a
-        LAUNCHER monkey when resolution fails (works on physical devices). The
-        resolve-first order exists because ``monkey -p`` silently fails on API 35
-        emulators (the app starts but doesn't foreground).
+        Resolve the main launcher activity and ``am start -n`` it; when
+        ``resolve-activity`` does not name ``package`` (e.g. Android's
+        ``ResolverActivity`` when two launcher activities exist), query
+        ``query-activities`` for MAIN/LAUNCHER: start a single match, raise on
+        2+ matches, and fall back to a LAUNCHER monkey only when 0 match.
         """
         resolved = self._resolve_launcher_activity(serial, package)
+        if not resolved:
+            activities = self._query_launcher_activities(serial, package)
+            if len(activities) > 1:
+                components = ", ".join(f"{package}/{act}" for act in activities)
+                raise RuntimeError(
+                    f"{package} has {len(activities)} launcher activities: "
+                    f"{components}; pass activity= to choose one"
+                )
+            if activities:
+                resolved = activities[0]
         if resolved:
             self._shell(
                 serial,
@@ -332,6 +362,26 @@ class _AppsMixin:
             return None
         return self._parse_resolved_activity(output, package)
 
+    def _query_launcher_activities(self, serial: str, package: str) -> list[str]:
+        """List all MAIN/LAUNCHER activity names declared by ``package``."""
+        cmd = (
+            "cmd package query-activities --brief "
+            "-a android.intent.action.MAIN "
+            f"-c android.intent.category.LAUNCHER {_q(package)}"
+        )
+        output = self._shell(serial, cmd)
+        return self._parse_launcher_activities(output, package)
+
+    @staticmethod
+    def _parse_launcher_activities(output: str, package: str) -> list[str]:
+        """Extract activity names for ``package`` from ``--brief`` package output."""
+        prefix = f"{package}/"
+        return [
+            s.removeprefix(prefix)
+            for line in output.splitlines()
+            if (s := line.strip()).startswith(prefix)
+        ]
+
     @staticmethod
     def _parse_resolved_activity(output: str, package: str) -> str | None:
         """Extract the activity component from ``resolve-activity --brief`` output.
@@ -344,11 +394,8 @@ class _AppsMixin:
         Returns the activity name (``"com.pkg/.Activity"`` -> ``".Activity"``)
         for the first line naming ``package``, else None.
         """
-        for line in output.strip().splitlines():
-            line = line.strip()
-            if "/" in line and line.split("/", 1)[0] == package:
-                return line.split("/", 1)[1]
-        return None
+        activities = _AppsMixin._parse_launcher_activities(output, package)
+        return activities[0] if activities else None
 
     def kill(self, serial: str, package: str) -> None:
         """Force-stop an app."""

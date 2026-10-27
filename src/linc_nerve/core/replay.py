@@ -158,7 +158,8 @@ def plan_lines(lines: Iterable[tuple[int, Any]]) -> list[Step]:
 
     Keeps successful (``ok``), non-readonly ``action`` lines of the
     :data:`REPLAYABLE_TOOLS` (tap, long press, swipe, type, key, launch); drops
-    the header, guard lines, failed actions and every other tool. Taps and long
+    the header, guard and guard_updated lines, failed actions and every other
+    tool. Taps and long
     presses carry their recorded ``target`` as a locator. A kept line whose
     ``args`` is not an object, ``seq`` not an integer, or ``duration_ms`` /
     ``t_session_s`` not a finite number raises ValueError naming its line.

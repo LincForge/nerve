@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import time
+import types
 import typing
 from collections.abc import Callable
 from typing import Any
@@ -20,6 +21,7 @@ from typing import Any
 import structlog
 
 from linc_nerve.core import adb_health
+from linc_nerve.core.android import validate_launch_uri
 from linc_nerve.core.emulator_console import is_allowed_sensor_type
 from linc_nerve.core.observability import log_mcp_call
 
@@ -77,8 +79,9 @@ _TRAVERSAL_PARAM_NAMES = frozenset(
 # `_validate_shell_identifier`/`_validate_activity` with `fullmatch`, and
 # shlex-quote each token — 2026-10-02 security review H1), so this router
 # check is the outer layer of two, not the only one. A field like `uri`
-# legitimately contains `&` in multi-param deep links (guarding it here would
-# repeat the finding-7 false-positive mistake); core shell-quotes it.
+# is validated against RFC 3986 grammar via `validate_launch_uri`
+# (`_reject_bad_uri`), which admits `&` so multi-param deep links pass
+# without repeating the finding-7 false positive, and core shell-quotes it.
 # `package` is the one field this PR can safely close at the router
 # chokepoint. NOTE: round 0 justified that with "Android package
 # identifiers are always `[a-zA-Z0-9_.]+`, so there is no legitimate value
@@ -87,8 +90,7 @@ _TRAVERSAL_PARAM_NAMES = frozenset(
 # bundle IDs, which legitimately contain `-`, and linc-crucible sends
 # `package=""` on every BVT navigate step. The shipped grammar at
 # `_ROUTER_IDENTIFIER_RE` reflects those collisions, not the original claim.
-# (Historical: the activity/uri class this comment once deferred to a
-# follow-up is closed in core — activity is allowlisted, uri is quoted.)
+# (Historical: activity is allowlisted, uri is RFC 3986-validated and quoted.)
 #
 # round-0 repair used a DENYLIST (`_SHELL_METACHAR_PATTERN =
 # re.compile(r"[;&|`$()\n\r]")`) that missed `>`, `<`, `*`, quotes, and
@@ -556,6 +558,22 @@ def _reject_bad_extras_key(tool_name: str, body: dict[str, Any]) -> dict[str, An
     }
 
 
+def _reject_bad_uri(tool_name: str, body: dict[str, Any]) -> dict[str, Any] | None:
+    """400 rejection if a top-level uri is present, non-empty, and invalid."""
+    uri = body.get("uri")
+    if not isinstance(uri, str) or not uri:
+        return None
+    try:
+        validate_launch_uri(uri)
+    except ValueError:
+        log.warning("tool_call_rejected_bad_uri", tool=tool_name)
+        return {
+            "status": 400,
+            "body": {"error": "Request body contains a disallowed uri value"},
+        }
+    return None
+
+
 def _reject_bad_filter(tool_name: str, body: dict[str, Any]) -> dict[str, Any] | None:
     """400 rejection if a log-filter field doesn't match the safe grammar, else None."""
     if not _contains_bad_filter(body):
@@ -600,6 +618,7 @@ _PRE_DISPATCH_GUARDS = (
     _reject_bad_path,
     _reject_shell_metacharacters,
     _reject_bad_extras_key,
+    _reject_bad_uri,
     _reject_bad_filter,
     _reject_bad_sensor_type,
     _check_reservation_conflict,
@@ -711,18 +730,43 @@ def _json_type_name(value: Any) -> str:
     return _JSON_TYPE_NAMES.get(type(value), type(value).__name__)
 
 
+_UNION_ORIGINS = (typing.Union, types.UnionType)
+
+
+def _coerced_type(hint: Any) -> Any:
+    """The int/bool/float a param coerces to: the hint itself, or X of ``X | None``.
+
+    ``Optional[X]`` is the same union. Any other hint (str, a wider union) → None.
+    """
+    if hint in _COERCERS:
+        return hint
+    if typing.get_origin(hint) not in _UNION_ORIGINS:
+        return None
+    members = [arg for arg in typing.get_args(hint) if arg is not type(None)]
+    if len(members) == 1 and members[0] in _COERCERS:
+        return members[0]
+    return None
+
+
+def _coerce_param(hint: Any, value: Any) -> Any:
+    """`value` coerced to `hint` (None stays None for ``X | None``), or `_INVALID`."""
+    target = _coerced_type(hint)
+    if target is None or (value is None and target is not hint):
+        return value
+    return _COERCERS[target](value)
+
+
 def _coerce_typed_params(fn: Callable[..., Any], body: dict[str, Any]) -> dict[str, Any] | None:
-    """Coerce int/bool/float-annotated params of `fn` in `body`, in place.
+    """Coerce int/bool/float (or ``X | None``) params of `fn` in `body`, in place.
 
     Returns None when every typed param is (now) the annotated type, else a
     400 rejection naming the FIRST bad field.
     """
     hints = _type_hints_for(fn)
     for name, value in body.items():
-        coerce = _COERCERS.get(hints.get(name))
-        coerced = value if coerce is None else coerce(value)
+        coerced = _coerce_param(hints.get(name), value)
         if coerced is _INVALID:
-            expected = hints[name].__name__
+            expected = _coerced_type(hints[name]).__name__
             error = f"Invalid parameters: {name} must be {expected}, got {_json_type_name(value)}"
             return {"status": 400, "body": {"error": error}}
         body[name] = coerced

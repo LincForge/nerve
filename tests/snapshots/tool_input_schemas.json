@@ -35,7 +35,8 @@
       "path"
     ],
     "title": "_nerve_actionlog_start_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_actionlog_stop": {
     "properties": {
@@ -48,7 +49,8 @@
       "device"
     ],
     "title": "_nerve_actionlog_stop_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_apps": {
     "properties": {
@@ -61,12 +63,14 @@
       "device"
     ],
     "title": "_nerve_apps_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_capabilities": {
     "properties": {},
     "title": "_nerve_capabilities_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_clear_app_data": {
     "properties": {
@@ -89,7 +93,8 @@
       "package"
     ],
     "title": "_nerve_clear_app_data_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_density": {
     "properties": {
@@ -102,7 +107,8 @@
       "device"
     ],
     "title": "_nerve_density_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_device_state": {
     "properties": {
@@ -130,7 +136,8 @@
       "action"
     ],
     "title": "_nerve_device_state_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_diff": {
     "properties": {
@@ -143,12 +150,14 @@
       "device"
     ],
     "title": "_nerve_diff_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_discover": {
     "properties": {},
     "title": "_nerve_discover_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_elements": {
     "properties": {
@@ -171,12 +180,14 @@
       "device"
     ],
     "title": "_nerve_elements_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_emulator_list": {
     "properties": {},
     "title": "_nerve_emulator_list_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_emulator_start": {
     "properties": {
@@ -204,7 +215,8 @@
       "name_or_id"
     ],
     "title": "_nerve_emulator_start_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_emulator_stop": {
     "properties": {
@@ -217,11 +229,13 @@
       "device"
     ],
     "title": "_nerve_emulator_stop_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_ensure_ready": {
     "properties": {
       "device": {
+        "default": "",
         "title": "Device",
         "type": "string"
       },
@@ -231,11 +245,9 @@
         "type": "boolean"
       }
     },
-    "required": [
-      "device"
-    ],
     "title": "_nerve_ensure_ready_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_extract_frames": {
     "properties": {
@@ -258,7 +270,8 @@
       "timestamps"
     ],
     "title": "_nerve_extract_frames_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_grant_permission": {
     "properties": {
@@ -286,7 +299,32 @@
       "permission"
     ],
     "title": "_nerve_grant_permission_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
+  },
+  "nerve_ground": {
+    "properties": {
+      "device": {
+        "title": "Device",
+        "type": "string"
+      },
+      "prompt": {
+        "title": "Prompt",
+        "type": "string"
+      },
+      "annotate": {
+        "default": false,
+        "title": "Annotate",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "device",
+      "prompt"
+    ],
+    "title": "_nerve_ground_syncArguments",
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_inject_sensor": {
     "properties": {
@@ -319,7 +357,8 @@
       "device"
     ],
     "title": "_nerve_inject_sensor_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_inspect": {
     "properties": {
@@ -342,7 +381,8 @@
       "package"
     ],
     "title": "_nerve_inspect_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_install": {
     "properties": {
@@ -360,7 +400,8 @@
       "path"
     ],
     "title": "_nerve_install_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_key": {
     "properties": {
@@ -369,16 +410,22 @@
         "type": "string"
       },
       "key": {
+        "default": "",
         "title": "Key",
+        "type": "string"
+      },
+      "keycode": {
+        "default": "",
+        "title": "Keycode",
         "type": "string"
       }
     },
     "required": [
-      "device",
-      "key"
+      "device"
     ],
     "title": "_nerve_key_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_kill": {
     "properties": {
@@ -396,11 +443,13 @@
       "package"
     ],
     "title": "_nerve_kill_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_launch": {
     "properties": {
       "device": {
+        "default": "",
         "title": "Device",
         "type": "string"
       },
@@ -428,11 +477,11 @@
       }
     },
     "required": [
-      "device",
       "package"
     ],
     "title": "_nerve_launch_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_logcat": {
     "properties": {
@@ -449,13 +498,24 @@
         "default": "",
         "title": "Tag",
         "type": "string"
+      },
+      "package": {
+        "default": "",
+        "title": "Package",
+        "type": "string"
+      },
+      "grep": {
+        "default": "",
+        "title": "Grep",
+        "type": "string"
       }
     },
     "required": [
       "device"
     ],
     "title": "_nerve_logcat_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_long_press": {
     "properties": {
@@ -483,7 +543,8 @@
       "y"
     ],
     "title": "_nerve_long_press_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_metrics": {
     "properties": {
@@ -509,7 +570,8 @@
       }
     },
     "title": "_nerve_metrics_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_navigate": {
     "properties": {
@@ -532,7 +594,8 @@
       "route_id"
     ],
     "title": "_nerve_navigate_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_navigate_screenshot": {
     "properties": {
@@ -565,7 +628,8 @@
       "route_id"
     ],
     "title": "_nerve_navigate_screenshot_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_network": {
     "properties": {
@@ -583,12 +647,14 @@
       "device"
     ],
     "title": "_nerve_network_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_pool": {
     "properties": {},
     "title": "_nerve_pool_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_record_fixed": {
     "properties": {
@@ -606,7 +672,8 @@
       "device"
     ],
     "title": "_nerve_record_fixed_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_record_start": {
     "properties": {
@@ -619,7 +686,8 @@
       "device"
     ],
     "title": "_nerve_record_start_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_record_stop": {
     "properties": {
@@ -632,11 +700,13 @@
       "device"
     ],
     "title": "_nerve_record_stop_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_release": {
     "properties": {
       "device": {
+        "default": "",
         "title": "Device",
         "type": "string"
       },
@@ -646,11 +716,9 @@
         "type": "string"
       }
     },
-    "required": [
-      "device"
-    ],
     "title": "_nerve_release_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_replay": {
     "properties": {
@@ -678,7 +746,8 @@
       "log_path"
     ],
     "title": "_nerve_replay_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_reserve": {
     "properties": {
@@ -716,7 +785,8 @@
       "device"
     ],
     "title": "_nerve_reserve_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_screenshot": {
     "properties": {
@@ -744,12 +814,14 @@
       "device"
     ],
     "title": "_nerve_screenshot_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_session_stats": {
     "properties": {},
     "title": "_nerve_session_stats_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_state": {
     "properties": {
@@ -767,7 +839,8 @@
       "device"
     ],
     "title": "_nerve_state_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_stream_logs": {
     "properties": {
@@ -785,7 +858,8 @@
       "device"
     ],
     "title": "_nerve_stream_logs_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_stream_screenshot": {
     "properties": {
@@ -803,7 +877,8 @@
       "device"
     ],
     "title": "_nerve_stream_screenshot_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_stream_start": {
     "properties": {
@@ -826,12 +901,14 @@
       "device"
     ],
     "title": "_nerve_stream_start_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_stream_status": {
     "properties": {},
     "title": "_nerve_stream_status_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_stream_stop": {
     "properties": {
@@ -844,7 +921,8 @@
       "device"
     ],
     "title": "_nerve_stream_stop_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_swipe": {
     "properties": {
@@ -853,36 +931,113 @@
         "type": "string"
       },
       "start_x": {
-        "title": "Start X",
-        "type": "integer"
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Start X"
       },
       "start_y": {
-        "title": "Start Y",
-        "type": "integer"
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Start Y"
       },
       "end_x": {
-        "title": "End X",
-        "type": "integer"
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "End X"
       },
       "end_y": {
-        "title": "End Y",
-        "type": "integer"
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "End Y"
       },
       "duration_ms": {
         "default": 300,
         "title": "Duration Ms",
         "type": "integer"
+      },
+      "x1": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "X1"
+      },
+      "y1": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Y1"
+      },
+      "x2": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "X2"
+      },
+      "y2": {
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Y2"
       }
     },
     "required": [
-      "device",
-      "start_x",
-      "start_y",
-      "end_x",
-      "end_y"
+      "device"
     ],
     "title": "_nerve_swipe_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_tap": {
     "properties": {
@@ -891,21 +1046,41 @@
         "type": "string"
       },
       "x": {
-        "title": "X",
-        "type": "integer"
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "X"
       },
       "y": {
-        "title": "Y",
-        "type": "integer"
+        "anyOf": [
+          {
+            "type": "integer"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Y"
+      },
+      "prompt": {
+        "default": "",
+        "title": "Prompt",
+        "type": "string"
       }
     },
     "required": [
-      "device",
-      "x",
-      "y"
+      "device"
     ],
     "title": "_nerve_tap_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_type": {
     "properties": {
@@ -928,7 +1103,8 @@
       "text"
     ],
     "title": "_nerve_type_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_uninstall": {
     "properties": {
@@ -951,7 +1127,8 @@
       "package"
     ],
     "title": "_nerve_uninstall_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   },
   "nerve_usage_stats": {
     "properties": {
@@ -977,6 +1154,7 @@
       }
     },
     "title": "_nerve_usage_stats_syncArguments",
-    "type": "object"
+    "type": "object",
+    "additionalProperties": false
   }
 }

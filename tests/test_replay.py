@@ -955,3 +955,23 @@ def test_registered_device_tool_ignores_global_and_unknown_tools() -> None:
 def test_element_centre_none_for_unparseable_bounds() -> None:
     assert replay.element_centre({"bounds": "junk"}) is None
     assert replay.element_centre({"bounds": "[0,0][10,20]"}) == (5, 10)
+
+
+def test_replay_tool_skips_guard_updated_lines(tool_ctrl: Any, tmp_path: Path) -> None:
+    entries = [
+        FIXTURE_LOG[0],
+        {"type": "guard", "tool": "nerve_tap", "reason": "denied_label", "detail": "checkout"},
+        {
+            "event": "guard_updated",
+            "deny_words": ["delete account"],
+            "allowed_packages": ["com.example.app"],
+            "t_session_s": 1.2,
+        },
+        FIXTURE_LOG[2],
+    ]
+    log_path = _write_log(tmp_path / "rearmed.jsonl", entries)
+    result = _nerve_replay_sync("S", str(log_path))
+    assert result["outcome"] == "completed"
+    assert result["steps_total"] == 1
+    assert result["steps_done"] == 1
+    assert tool_ctrl.calls == [("tap", (200, 150))]

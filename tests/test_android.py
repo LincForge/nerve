@@ -824,12 +824,14 @@ class TestAndroidAppLifecycle:
             "nosdcard,default\n",
             # Second call: resolve-activity fails
             "Error: No activity found\n",
-            # Third call: monkey fallback
+            # Third call: query-activities finds no launcher activities
+            "No activities found\n",
+            # Fourth call: monkey fallback
             "Events injected: 1",
         ]
 
         ctrl.launch("ABC", "com.app")
-        assert mock_device.shell.call_count == 3
+        assert mock_device.shell.call_count == 4
         mock_device.shell.assert_any_call(
             "monkey -p com.app -c android.intent.category.LAUNCHER 1", timeout=15
         )
@@ -995,10 +997,10 @@ class TestAndroidAppLifecycle:
         ]
 
     def test_launch_with_uri_space_and_semicolon_survives_shell(self) -> None:
-        """A URI with a space and a `;` must arrive at the device as one literal arg.
+        """A URI with a percent-encoded space and a `;` must arrive at the device
+        as one literal arg.
 
-        An unquoted space would split the URI into two argv words, and an
-        unquoted `;` would terminate the `am start` command and start a new
+        An unquoted `;` would terminate the `am start` command and start a new
         one. Fails pre-fix.
         """
         ctrl = AndroidController()
@@ -1007,7 +1009,7 @@ class TestAndroidAppLifecycle:
         mock_client.device.return_value = mock_device
         ctrl._client = mock_client
 
-        uri = "app://navigate?screen=two words;rm -rf /tmp"
+        uri = "app://navigate?screen=two%20words;rm=-rf"
         ctrl.launch("ABC", "com.app", uri=uri)
         cmd = mock_device.shell.call_args.args[0]
         assert _sh_tokenize(cmd) == [
@@ -1177,7 +1179,8 @@ class TestAndroidAppLifecycle:
 
         mock_device.shell.side_effect = [
             "nosdcard,default\n",  # not a watch
-            "Error: No activity found\n",  # resolve fails → would fall to monkey
+            "Error: No activity found\n",  # resolve fails
+            "No activities found\n",  # query-activities finds 0 → would fall to monkey
         ]
 
         with pytest.raises(RuntimeError, match="extras"):
