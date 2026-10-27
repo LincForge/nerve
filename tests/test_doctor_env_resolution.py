@@ -42,7 +42,8 @@ def probed_ports(monkeypatch) -> list[int]:
         return None
 
     monkeypatch.setattr(doctor_mod, "_probe_daemon_health", _fake_health)
-    monkeypatch.setattr(doctor_mod, "_probe_adb_devices", lambda _adb: None)
+    monkeypatch.setattr(doctor_mod, "_probe_adb_devices", lambda _adb: (None, None))
+    monkeypatch.setattr(doctor_mod, "_adb_server_probe", lambda _addr: doctor_mod.AdbProbe.UNKNOWN)
     monkeypatch.setattr(doctor_mod, "_probe_xcode_clt", lambda: None)
     return ports
 

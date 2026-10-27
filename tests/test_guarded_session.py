@@ -780,8 +780,10 @@ class TestInButtonSwipe:
         args = {"start_x": 0, "start_y": 0, "end_x": 900, "end_y": 900}
         assert action_log.needs_label_check("nerve_swipe", args) is True
 
-    def test_malformed_swipe_needs_no_check(self) -> None:
-        assert action_log.needs_label_check("nerve_swipe", {"start_x": "x"}) is False
+    def test_malformed_swipe_still_needs_check(self) -> None:
+        """Fail closed: unparseable coordinates are refused, never waved through."""
+        assert action_log.needs_label_check("nerve_swipe", {"start_x": "x"}) is True
+        assert action_log.coordinate_refusal("nerve_swipe", {"start_x": "x"}) is not None
 
     def test_click_point_is_the_start_inside_one_clickable(self) -> None:
         args = {"start_x": 40, "start_y": 1100, "end_x": 540, "end_y": 1100}
@@ -808,3 +810,135 @@ def test_activation_key_with_nothing_focused_refused(ctrl: FakeController, tmp_p
     assert _tool_calls(ctrl, "press_key") == []
     (line,) = _lines(path, "guard")
     assert line["detail"] == "no focused element"
+
+
+# ---------------------------------------------------------------------------
+# Remediation hint on denied_label + in-place guard re-arm
+# ---------------------------------------------------------------------------
+
+
+def test_denied_label_refusal_carries_default_list_hint(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    _start(tmp_path, target_package=TARGET)
+    ctrl.label = {"text": "Checkout"}
+
+    result = input_tools._nerve_tap_sync("S", 150, 150)
+
+    assert result == {
+        "error": "guarded session: input on a 'checkout' label refused",
+        "guard": "denied_label",
+        "detail": "checkout",
+        "validation_error": True,
+        "hint": (
+            "'checkout' is on the default deny list. If tapping it is intended in "
+            "this session, call nerve_actionlog_start again with the same path and "
+            "deny_words set to the full list you want (deny_words replaces the "
+            "defaults; pass 'delete account' to keep only that)."
+        ),
+    }
+
+
+def test_denied_label_refusal_hint_names_custom_list_when_set(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    _start(tmp_path, target_package=TARGET, deny_words="launch missiles, nuke")
+    ctrl.label = {"text": "Launch missiles"}
+
+    result = input_tools._nerve_tap_sync("S", 150, 150)
+
+    assert result["guard"] == "denied_label"
+    assert result["detail"] == "launch missiles"
+    assert "default deny list" not in result["hint"]
+    assert "launch missiles, nuke" in result["hint"]
+    assert "nerve_actionlog_start" in result["hint"]
+
+
+def test_rearm_same_path_lifts_checkout_and_logs_in_same_file(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    path = _start(tmp_path, target_package=TARGET)
+    ctrl.label = {"text": "Checkout"}
+
+    refused = input_tools._nerve_tap_sync("S", 150, 150)
+    assert refused["guard"] == "denied_label"
+    assert refused["detail"] == "checkout"
+    assert _tool_calls(ctrl, "tap") == []
+
+    rearmed = _nerve_actionlog_start_sync(
+        "S", str(path), target_package=TARGET, deny_words="delete account"
+    )
+    assert rearmed.get("success") is True, rearmed
+    assert rearmed["action"] == "actionlog_start"
+    assert rearmed["rearmed"] is True
+    assert "'checkout' is on the default deny list." in refused["hint"]
+
+    allowed = input_tools._nerve_tap_sync("S", 150, 150)
+    assert allowed == {"success": True, "action": "tap", "x": 150, "y": 150}
+    assert _tool_calls(ctrl, "tap") == [("S", 150, 150)]
+
+    # "delete account" stays refused after narrowing deny_words to it
+    ctrl.label = {"text": "Delete account"}
+    still_refused = input_tools._nerve_tap_sync("S", 150, 150)
+    assert still_refused["guard"] == "denied_label"
+    assert still_refused["detail"] == "delete account"
+    assert "default deny list" not in still_refused["hint"]
+    assert "delete account" in still_refused["hint"]
+
+    raw_lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [r.get("event") or r["type"] for r in raw_lines] == [
+        "header",
+        "guard",
+        "guard_updated",
+        "action",
+        "guard",
+    ]
+    assert raw_lines[2]["event"] == "guard_updated"
+    assert raw_lines[2]["deny_words"] == ["delete account"]
+    assert TARGET in raw_lines[2]["allowed_packages"]
+    assert isinstance(raw_lines[2]["t_session_s"], float)
+
+
+def test_rearm_different_path_or_target_or_mode_flip_errors(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    path = _start(tmp_path, target_package=TARGET)
+
+    diff_path = _nerve_actionlog_start_sync(
+        "S", str(tmp_path / "other.jsonl"), target_package=TARGET, deny_words="delete account"
+    )
+    assert "action log already active on S" in diff_path["error"]
+    assert "nerve_actionlog_stop" in diff_path["hint"]
+
+    diff_target = _nerve_actionlog_start_sync(
+        "S", str(path), target_package="com.other.app", deny_words="delete account"
+    )
+    assert "action log already active on S" in diff_target["error"]
+    assert "nerve_actionlog_stop" in diff_target["hint"]
+
+    to_unguarded = _nerve_actionlog_start_sync("S", str(path), target_package="")
+    assert "action log already active on S" in to_unguarded["error"]
+    assert "nerve_actionlog_stop" in to_unguarded["hint"]
+
+    _nerve_actionlog_stop_sync("S")
+    unguarded_path = tmp_path / "unguarded.jsonl"
+    _nerve_actionlog_start_sync("S", str(unguarded_path))
+    to_guarded = _nerve_actionlog_start_sync("S", str(unguarded_path), target_package=TARGET)
+    assert "action log already active on S" in to_guarded["error"]
+    assert "nerve_actionlog_stop" in to_guarded["hint"]
+
+
+def test_rearm_never_widens_allowed_packages_unless_asked(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    path = _start(tmp_path, target_package=TARGET)
+    rearmed = _nerve_actionlog_start_sync(
+        "S", str(path), target_package=TARGET, deny_words="delete account"
+    )
+    assert rearmed["rearmed"] is True
+
+    ctrl.foreground = "com.android.vending"
+    cross_app = input_tools._nerve_tap_sync("S", 150, 150)
+    assert cross_app["guard"] == "foreground_not_allowed"
+    assert "hint" not in cross_app
+    assert _tool_calls(ctrl, "tap") == []

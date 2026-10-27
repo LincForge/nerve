@@ -364,7 +364,7 @@ def test_mcp_wrapper_logs_exactly_once(ctrl: FakeController, tmp_path: Path) -> 
 def test_wrapper_preserves_name_and_signature() -> None:
     fn = input_tools._nerve_tap_sync
     assert fn.__name__ == "_nerve_tap_sync"
-    assert list(inspect.signature(fn).parameters) == ["device", "x", "y"]
+    assert list(inspect.signature(fn).parameters) == ["device", "x", "y", "prompt"]
     assert "Tap a single point" in (fn.__doc__ or "")
 
 
@@ -534,3 +534,104 @@ def test_replay_relative_log_path_resolves_under_first_root(
     (a / "rel.jsonl").write_text('{"type": "header"}\n', encoding="utf-8")
     monkeypatch.setenv("NERVE_ACTIONLOG_ROOTS", f"{a}:{b}")
     assert actionlog_tools._load_log("rel.jsonl") == [(1, {"type": "header"})]
+
+
+def test_start_already_active_different_path_includes_stop_first_hint(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    path_a = tmp_path / "a.jsonl"
+    path_b = tmp_path / "b.jsonl"
+    _nerve_actionlog_start_sync("S", str(path_a), target_package="com.example.app")
+
+    second = _nerve_actionlog_start_sync("S", str(path_b), target_package="com.example.app")
+    assert "action log already active on S" in second["error"]
+    assert "nerve_actionlog_stop" in second["hint"]
+
+
+def test_start_rearm_returns_rearmed_and_updated_guard_info(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    path = tmp_path / "a.jsonl"
+    first = _nerve_actionlog_start_sync("S", str(path), target_package="com.example.app")
+    assert first["success"] is True
+    assert "rearmed" not in first
+
+    rearmed = _nerve_actionlog_start_sync(
+        "S",
+        str(path),
+        target_package="com.example.app",
+        allow_packages="com.example.auth",
+        deny_words="delete account",
+    )
+    assert rearmed["success"] is True
+    assert rearmed["action"] == "actionlog_start"
+    assert rearmed["rearmed"] is True
+    assert rearmed["guarded"] is True
+    assert "com.example.auth" in rearmed["allowed_packages"]
+    assert rearmed["deny_words"] == ["delete account"]
+
+
+def test_start_and_rearm_results_are_exact(
+    ctrl: FakeController, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import UTC, datetime
+
+    monkeypatch.setattr(
+        action_log, "_wallclock", lambda: datetime(2026, 10, 3, 12, 0, 0, tzinfo=UTC)
+    )
+    first = _nerve_actionlog_start_sync(
+        "S", str(tmp_path / "a.jsonl"), target_package="com.example.app"
+    )
+    resolved = first["path"]
+    builtin = action_log.BUILTIN_ALLOWED_PACKAGES
+    assert first == {
+        "success": True,
+        "action": "actionlog_start",
+        "serial": "S",
+        "path": resolved,
+        "started_at": "2026-10-03T12:00:00+00:00",
+        "guarded": True,
+        "target_package": "com.example.app",
+        "allowed_packages": sorted({"com.example.app"} | builtin),
+        "deny_words": list(action_log.DEFAULT_DENY_WORDS),
+    }
+
+    rearmed = _nerve_actionlog_start_sync(
+        "S",
+        resolved,
+        target_package="com.example.app",
+        allow_packages="com.example.auth",
+        deny_words="delete account",
+    )
+    assert rearmed == {
+        "success": True,
+        "action": "actionlog_start",
+        "serial": "S",
+        "path": resolved,
+        "started_at": "2026-10-03T12:00:00+00:00",
+        "rearmed": True,
+        "guarded": True,
+        "target_package": "com.example.app",
+        "allowed_packages": sorted({"com.example.app", "com.example.auth"} | builtin),
+        "deny_words": ["delete account"],
+    }
+
+
+def test_already_active_error_is_exact_with_stop_first_hint(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    assert action_log.ALREADY_ACTIVE_HINT == (
+        "Call nerve_actionlog_stop first to start a new log, or call "
+        "nerve_actionlog_start with the active path and target_package to "
+        "re-arm the guard in place."
+    )
+    first = _nerve_actionlog_start_sync(
+        "S", str(tmp_path / "a.jsonl"), target_package="com.example.app"
+    )
+    second = _nerve_actionlog_start_sync(
+        "S", str(tmp_path / "b.jsonl"), target_package="com.example.app"
+    )
+    assert second == {
+        "error": f"action log already active on S: {first['path']}",
+        "hint": action_log.ALREADY_ACTIVE_HINT,
+    }

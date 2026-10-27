@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Annotated, Any
 
+from pydantic import Field
+
+from linc_nerve.core.android import validate_launch_uri
 from linc_nerve.mcp import _core
 from linc_nerve.mcp._confirm import confirmation_gate
 from linc_nerve.mcp._core import device_tool
@@ -70,7 +73,7 @@ def _nerve_install_sync(device: str, path: str) -> dict[str, Any]:
 
 @device_tool
 def _nerve_launch_sync(
-    device: str,
+    device: Annotated[str, Field(default="")],
     package: str,
     uri: str = "",
     extras: dict[str, Any] | None = None,
@@ -84,7 +87,7 @@ def _nerve_launch_sync(
     package names (com.lincmobile.level), iOS uses bundle IDs.
 
     Args:
-        device: Device serial.
+        device: Device serial (optional when the caller holds a single reservation).
         package: Android package name or iOS bundle ID.
         uri: Optional deep link URI (e.g. "precisionlevel://settings"). When provided,
              launches the app directly to the specified screen.
@@ -93,6 +96,12 @@ def _nerve_launch_sync(
              Lets consent-gated apps run unattended BVTs without a manual am-start priming
              step. iOS support is platform-dependent — see core/ios.py launch().
     """
+    if uri:
+        try:
+            validate_launch_uri(uri)
+        except ValueError as exc:
+            return {"error": f"Launch failed: {exc}"}
+
     dev, platform = _core._resolve_device(device)
     if dev is None:
         return {"error": platform}

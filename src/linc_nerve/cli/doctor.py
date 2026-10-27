@@ -20,19 +20,26 @@ Exit contract: 0 all-green (warns allowed), 1 if any check fails.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import enum
+import errno
 import json as _json
 import os
 import platform
 import shutil
+import socket
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 import click
 
+from linc_nerve.core.adb_path import ADB_PATH
+from linc_nerve.core.adb_server import AdbServerAddress, adb_server_address
 from linc_nerve.core.http_port import DEFAULT_HTTP_PORT, resolve_http_port
 from linc_nerve.core.observability import linc_home
 
@@ -99,6 +106,7 @@ class ProbeReport:
     linc_home_exists: bool = True
     missing_linc_dirs: tuple[str, ...] = field(default_factory=tuple)
     linc_home: str = ""  # resolved $LINC_HOME; "" → resolve at check time
+    adb_server_listening: bool = True  # False only when doctor stopped a server it started
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +115,10 @@ class ProbeReport:
 
 
 def check_adb(
-    adb_path: str, is_executable: bool, devices_output: str | None
+    adb_path: str,
+    is_executable: bool,
+    devices_output: str | None,
+    server_listening: bool = True,
 ) -> CheckResult:
     """adb binary present + server responsive."""
     if not is_executable:
@@ -127,7 +138,10 @@ def check_adb(
             detail=f"adb present at {adb_path} but server unresponsive",
             hint="Run: adb start-server (or `nerve doctor --fix`)",
         )
-    return CheckResult(name="adb", status="ok", detail=f"adb responsive ({adb_path})")
+    suffix = "" if server_listening else " (server started for the check and stopped)"
+    return CheckResult(
+        name="adb", status="ok", detail=f"adb responsive ({adb_path}){suffix}"
+    )
 
 
 def check_device_auth(devices_output: str | None) -> CheckResult:
@@ -295,7 +309,12 @@ def check_linc_layout(
 def run_checks(probes: ProbeReport) -> list[CheckResult]:
     """Run every diagnostic check over the gathered probes. Pure."""
     return [
-        check_adb(probes.adb_path, probes.adb_is_executable, probes.adb_devices_output),
+        check_adb(
+            probes.adb_path,
+            probes.adb_is_executable,
+            probes.adb_devices_output,
+            probes.adb_server_listening,
+        ),
         check_device_auth(probes.adb_devices_output),
         check_scrcpy_server(probes.scrcpy_server_exists, probes.scrcpy_server_path),
         check_wda_project(probes.wda_project_dir, probes.wda_checkout_exists),
@@ -357,8 +376,6 @@ def _execute_fix(fix: FixAction) -> None:
         for d in fix.args:
             Path(d).expanduser().mkdir(parents=True, exist_ok=True)
     elif fix.kind == "adb-start-server":
-        from linc_nerve.core.adb_path import ADB_PATH
-
         subprocess.run([ADB_PATH, "start-server"], check=False, timeout=15)
 
 
@@ -381,17 +398,106 @@ def apply_fixes(
 # ---------------------------------------------------------------------------
 
 
-def _probe_adb_devices(adb_path: str) -> str | None:
-    """One `adb devices` run — proves the server is (or can get) responsive."""
+class AdbProbe(enum.Enum):
+    """Outcome of the pre-``adb devices`` connect to the adb server address.
+
+    Only ``REFUSED`` is positive evidence that no server was running; every
+    other failure (timeout, unexpected error, an address nerve rejects) is
+    ``UNKNOWN`` and must be treated as "a server may be running".
+    """
+
+    LISTENING = "listening"
+    REFUSED = "refused"
+    UNKNOWN = "unknown"
+
+
+_DAEMON_STARTED = "daemon started successfully"
+
+
+def classify_connect_error(exc: BaseException) -> AdbProbe:
+    """Map a connect failure to ``REFUSED`` only on a positive ECONNREFUSED. Pure."""
+    if isinstance(exc, ConnectionRefusedError):
+        return AdbProbe.REFUSED
+    if isinstance(exc, OSError) and exc.errno == errno.ECONNREFUSED:
+        return AdbProbe.REFUSED
+    return AdbProbe.UNKNOWN
+
+
+def should_stop(probe: AdbProbe, devices_stderr: str | None) -> bool:
+    """True only when no server was running AND our ``adb devices`` started one. Pure.
+
+    The stderr match is case- and whitespace-insensitive. A server someone
+    else started between the probe and ``adb devices`` (no phrase in our
+    stderr) is left running.
+    """
+    if probe is not AdbProbe.REFUSED or not isinstance(devices_stderr, str):
+        return False
+    return _DAEMON_STARTED in " ".join(devices_stderr.lower().split())
+
+
+def _adb_server_probe(address: AdbServerAddress) -> AdbProbe:
+    """Connect once to ``address`` and classify the outcome."""
     try:
-        proc = subprocess.run(
-            [adb_path, "devices"], capture_output=True, text=True, timeout=10
-        )
+        with socket.create_connection((address.host, address.port), timeout=0.5):
+            return AdbProbe.LISTENING
+    except Exception as exc:
+        return classify_connect_error(exc)
+
+
+def _probe_adb_listening(
+    listening_probe: Callable[[AdbServerAddress], AdbProbe] | None = None,
+) -> AdbProbe:
+    """Guard ``adb_server_address()`` + the probe: any failure reads ``UNKNOWN``."""
+    try:
+        probe = listening_probe or _adb_server_probe
+        result = probe(adb_server_address())
     except Exception:
-        return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout
+        return AdbProbe.UNKNOWN
+    return result if isinstance(result, AdbProbe) else AdbProbe.UNKNOWN
+
+
+def _probe_adb_devices(adb_path: str) -> tuple[str | None, str | None]:
+    """One `adb devices` run -> (stdout on success else None, stderr)."""
+    try:
+        proc = subprocess.run([adb_path, "devices"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None, None
+    stdout = proc.stdout if proc.returncode == 0 else None
+    return stdout, proc.stderr
+
+
+def _stop_probe_started_server(adb_path: str) -> None:
+    """Best-effort ``adb kill-server`` for an adb server started by our own probe."""
+    with contextlib.suppress(Exception):
+        subprocess.run(
+            [adb_path, "kill-server"],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+
+
+def _run_adb_probe(
+    adb_path: str,
+    adb_executable: bool,
+    listening_probe: Callable[[AdbServerAddress], AdbProbe] | None = None,
+) -> tuple[bool, str | None]:
+    """Probe the server address, run ``adb devices``, and stop the server only
+    when ``should_stop`` proves this call started it.
+
+    Returns ``(server_left_running, devices_stdout)``; the flag is False only
+    when doctor stopped a server it started.
+    """
+    probe = _probe_adb_listening(listening_probe)
+    if not adb_executable:
+        return True, None
+    devices_output, devices_stderr = _probe_adb_devices(adb_path)
+    if should_stop(probe, devices_stderr):
+        _stop_probe_started_server(adb_path)
+        return False, devices_output
+    return True, devices_output
 
 
 def _probe_xcode_clt() -> str | None:
@@ -436,19 +542,24 @@ def _probe_installed_version() -> str:
         return "unknown"
 
 
-def gather_probes(port: int | None = None) -> ProbeReport:
+def gather_probes(
+    port: int | None = None,
+    *,
+    listening_probe: Callable[[AdbServerAddress], AdbProbe] | None = None,
+) -> ProbeReport:
     """Collect raw host facts for the pure checks. Each probe is guarded.
 
     ``port`` resolves like the server binds: explicit > NERVE_HTTP_PORT > 8111.
     """
     port = resolve_http_port(port)
     from linc_nerve.core import scrcpy
-    from linc_nerve.core.adb_path import ADB_PATH
 
     adb_executable = shutil.which(ADB_PATH) is not None or (
         os.path.isabs(ADB_PATH) and os.access(ADB_PATH, os.X_OK)
     )
-    devices_output = _probe_adb_devices(ADB_PATH) if adb_executable else None
+    adb_listening, devices_output = _run_adb_probe(
+        ADB_PATH, adb_executable, listening_probe
+    )
 
     scrcpy_path = scrcpy._SERVER_DIR / scrcpy._SERVER_FILENAME
 
@@ -479,6 +590,7 @@ def gather_probes(port: int | None = None) -> ProbeReport:
         linc_home_exists=home.is_dir(),
         missing_linc_dirs=missing_dirs,
         linc_home=str(home),
+        adb_server_listening=adb_listening,
     )
 
 
@@ -508,8 +620,19 @@ def _render_text(results: list[CheckResult], fixes: list[FixAction], dry_run: bo
     return "\n".join(lines)
 
 
+def _validate_output_flags(human_output: bool, json_output: bool) -> None:
+    if human_output and json_output:
+        raise click.UsageError("--human and --json are mutually exclusive")
+
+
 @click.command()
 @click.option("--json", "json_output", is_flag=True, help="Machine-readable report")
+@click.option(
+    "--human",
+    "human_output",
+    is_flag=True,
+    help="Human-readable text report (default)",
+)
 @click.option("--fix", "do_fix", is_flag=True, help="Apply safe fixes (mkdir, adb start-server)")
 @click.option("--dry-run", is_flag=True, help="With --fix: print the plan, execute nothing")
 @click.option(
@@ -518,12 +641,19 @@ def _render_text(results: list[CheckResult], fixes: list[FixAction], dry_run: bo
     default=None,
     help=f"Daemon port to probe [default: $NERVE_HTTP_PORT or {DAEMON_PORT}]",
 )
-def doctor(json_output: bool, do_fix: bool, dry_run: bool, port: int | None) -> None:
+def doctor(
+    json_output: bool,
+    do_fix: bool,
+    dry_run: bool,
+    port: int | None,
+    human_output: bool = False,
+) -> None:
     """Diagnose the nerve environment — one-command bootstrap entry point.
 
     Exits 0 when all checks pass (warnings allowed), 1 when any check
     fails; every failure carries a one-line fix-it hint.
     """
+    _validate_output_flags(human_output, json_output)
     probes = gather_probes(port=port)
     results = run_checks(probes)
     fixes = plan_fixes(results) if (do_fix or dry_run) else []

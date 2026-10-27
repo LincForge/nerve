@@ -147,6 +147,8 @@ _DELEGATED_TO_CORE = {
     "_metrics",
     "_device_mgr",
     "_emulator",
+    "_daemon_mode",
+    "set_daemon_mode",
     "_cached_devices",
     "_cache_timestamp",
     "_cleanup_done",

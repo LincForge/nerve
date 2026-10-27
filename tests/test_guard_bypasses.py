@@ -356,3 +356,59 @@ class TestMatcher:
     def test_returns_the_canonical_custom_phrase(self) -> None:
         pattern = action_log.deny_pattern(["Launch  Missiles"])
         assert denied_label("LAUNCH-missiles now", pattern) == "launch missiles"
+
+
+# ---------------------------------------------------------------------------
+# 6. Input aliases (keycode=, x1..y2) fold before guard, log, and replay
+# ---------------------------------------------------------------------------
+
+
+def test_aliased_key_and_swipe_refused_like_canonical(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    path = _start(tmp_path, target_package=TARGET)
+    ctrl.tree = _FOCUSED_SUBSCRIBE
+    ctrl.label = {"text": "Buy"}
+
+    key_canon = input_tools._nerve_key_sync("S", "ENTER")
+    key_alias = input_tools._nerve_key_sync("S", keycode="ENTER")
+    swipe_canon = input_tools._nerve_swipe_sync("S", 150, 150, 150, 150)
+    swipe_alias = input_tools._nerve_swipe_sync("S", x1=150, y1=150, x2=150, y2=150)
+
+    assert key_alias == key_canon
+    assert swipe_alias == swipe_canon
+    assert _tool_calls(ctrl, "press_key") == []
+    assert _tool_calls(ctrl, "swipe") == []
+    g1, g2, g3, g4 = _lines(path, "guard")
+    assert (g1["tool"], g1["reason"], g1["detail"]) == (g2["tool"], g2["reason"], g2["detail"])
+    assert (g3["tool"], g3["reason"], g3["detail"]) == (g4["tool"], g4["reason"], g4["detail"])
+
+
+def test_aliased_key_and_swipe_log_canonical_args_and_replay(
+    ctrl: FakeController, tmp_path: Path
+) -> None:
+    from linc_nerve.mcp.actionlog_tools import _nerve_actionlog_stop_sync, _nerve_replay_sync
+
+    ctrl.tree = [{**_FOCUSED_SUBSCRIBE[1]}, {**_FOCUSED_SUBSCRIBE[2], "text": "Next"}]
+    log_path = _start(tmp_path, target_package=TARGET)
+    assert input_tools._nerve_key_sync("S", "ENTER") == input_tools._nerve_key_sync(
+        "S", keycode="ENTER"
+    )
+    assert input_tools._nerve_swipe_sync("S", 150, 150, 150, 900) == input_tools._nerve_swipe_sync(
+        "S", x1=150, y1=150, x2=150, y2=900
+    )
+    _nerve_actionlog_stop_sync("S")
+
+    k_canon, k_alias, s_canon, s_alias = _lines(log_path, "action")
+    assert k_canon["args"] == k_alias["args"] == {"key": "ENTER"}
+    assert (
+        s_canon["args"]
+        == s_alias["args"]
+        == {
+            "start_x": 150,
+            "start_y": 150,
+            "end_x": 150,
+            "end_y": 900,
+        }
+    )
+    assert _nerve_replay_sync("S", str(log_path))["outcome"] == "completed"

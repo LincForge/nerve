@@ -458,14 +458,15 @@ def test_c3_hostile_launch_package_and_uri(root: Path) -> None:
     bad_pkg, cmds_pkg = _replay_lines(
         root, _action(1, "nerve_launch", {"package": "com.a;reboot", "uri": ""})
     )
-    _, cmds_uri = _replay_lines(
+    bad_uri, cmds_uri = _replay_lines(
         root, _action(1, "nerve_launch", {"package": TARGET, "uri": "x://$(reboot) -n a/.B"})
     )
 
     assert bad_pkg["outcome"] == "diverged" and cmds_pkg == []
-    assert cmds_uri == [
-        f"am start -a android.intent.action.VIEW -d 'x://$(reboot) -n a/.B' {TARGET}"
-    ]
+    # linc-nerve-o2ro: a uri outside the RFC 3986 grammar (space here) is now
+    # refused before the shell string is built, instead of only being quoted.
+    assert bad_uri["outcome"] == "diverged" and "Invalid uri" in bad_uri["reason"]
+    assert cmds_uri == []
 
 
 @pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 0.0, -1.0, 120.5])

@@ -115,6 +115,7 @@ READONLY_TOOLS: frozenset[str] = frozenset(
         "nerve_elements",
         "nerve_state",
         "nerve_diff",
+        "nerve_ground",
         "nerve_density",
         "nerve_apps",
         "nerve_logcat",
@@ -545,6 +546,7 @@ class GuardConfig:
     allowed_packages: frozenset[str]
     deny_words: tuple[str, ...]
     pattern: re.Pattern[str] = field(compare=False, repr=False)
+    custom_deny: bool = False
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -564,14 +566,45 @@ def build_guard(
     """
     if not target_package:
         return None
-    words = tuple(split_csv(deny_words)) or DEFAULT_DENY_WORDS
+    custom = tuple(split_csv(deny_words))
+    words = custom or DEFAULT_DENY_WORDS
     allowed = frozenset({target_package, *split_csv(allow_packages)}) | BUILTIN_ALLOWED_PACKAGES
-    return GuardConfig(target_package, allowed, words, deny_pattern(words))
+    return GuardConfig(
+        target_package, allowed, words, deny_pattern(words), custom_deny=bool(custom)
+    )
 
 
-def refusal(reason: str, detail: str, message: str) -> dict[str, Any]:
+def _denied_label_hint(word: str, deny_words: Sequence[str] | None = None) -> str:
+    if deny_words:
+        joined = ", ".join(deny_words)
+        source = f"the session's deny_words list ({joined!r})"
+    else:
+        source = "the default deny list"
+    return (
+        f"'{word}' is on {source}. If tapping it is intended in this session, "
+        "call nerve_actionlog_start again with the same path and deny_words set "
+        "to the full list you want (deny_words replaces the defaults; pass "
+        "'delete account' to keep only that)."
+    )
+
+
+def refusal(
+    reason: str,
+    detail: str,
+    message: str,
+    *,
+    deny_words: Sequence[str] | None = None,
+) -> dict[str, Any]:
     """The tool result for a guard refusal (a validation error, not a tool failure)."""
-    return {"error": message, "guard": reason, "detail": detail, "validation_error": True}
+    result: dict[str, Any] = {
+        "error": message,
+        "guard": reason,
+        "detail": detail,
+        "validation_error": True,
+    }
+    if reason == "denied_label":
+        result["hint"] = _denied_label_hint(detail, deny_words)
+    return result
 
 
 def package_refusal(guard: GuardConfig, tool: str, args: dict[str, Any]) -> dict[str, Any] | None:
@@ -644,6 +677,53 @@ def _ints(args: dict[str, Any], *keys: str) -> tuple[int, ...] | None:
         return None
 
 
+# Coordinate args of each touch tool; the guard can only place a touch it can parse.
+COORDINATE_KEYS: dict[str, tuple[str, ...]] = {
+    "nerve_tap": ("x", "y"),
+    "nerve_long_press": ("x", "y"),
+    "nerve_swipe": ("start_x", "start_y", "end_x", "end_y"),
+}
+# Larger than any shipping panel dimension; fits in signed int16 so device-side
+# input injection cannot overflow.
+COORDINATE_MAX = 32767
+_INT_TEXT_RE = re.compile(r"-?[0-9]+")
+
+
+def is_integer_coordinate(value: Any) -> bool:
+    """An int (not bool), an integral float, or a plain ``-?[0-9]+`` string."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return value.is_integer()
+    return isinstance(value, str) and _INT_TEXT_RE.fullmatch(value) is not None
+
+
+def coordinate_in_range(value: Any) -> bool:
+    """An integer coordinate in ``0..COORDINATE_MAX``."""
+    return is_integer_coordinate(value) and 0 <= int(value) <= COORDINATE_MAX
+
+
+def non_integer_coordinates(tool: str, args: Mapping[str, Any]) -> list[str]:
+    """Coordinate args of *tool* that are missing, non-integer, or out of ``0..COORDINATE_MAX``."""
+    keys = COORDINATE_KEYS.get(tool, ())
+    return [key for key in keys if not coordinate_in_range(args.get(key))]
+
+
+def coordinate_refusal(tool: str, args: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Refuse a guarded touch whose coordinates are outside ``0..COORDINATE_MAX`` (fail closed).
+
+    Without valid coordinates the guard cannot find the element under the
+    touch, so it must not let the touch through unchecked.
+    """
+    bad = non_integer_coordinates(tool, args)
+    if not bad:
+        return None
+    detail = f"invalid coordinates (integers in 0..{COORDINATE_MAX} required): {', '.join(bad)}"
+    return refusal("target_unreadable", detail, f"guarded session: input refused, {detail}")
+
+
 def touch_point(tool: str, args: dict[str, Any]) -> tuple[int, ...] | None:
     """Where *tool* would click: a tap / long press point, or a short swipe's start.
 
@@ -699,15 +779,15 @@ def needs_label_check(tool: str, args: dict[str, Any]) -> bool:
     """Whether a guarded *tool* call may activate an element (and needs the tree).
 
     Taps, every swipe (a short one is a click; a long one may stay inside one
-    button), activation keys, and text that types ENTER / SPACE.
+    button), activation keys, and text that types ENTER / SPACE. A touch always
+    needs it, even with coordinates that do not parse (fail closed: see
+    :func:`coordinate_refusal`).
     """
     if tool == "nerve_key":
         return is_activation_key(args.get("key"))
     if tool == "nerve_type":
         return _types_keys(_typed_text(args))
-    if tool == "nerve_swipe":
-        return _ints(args, *_SWIPE_KEYS) is not None
-    return touch_point(tool, args) is not None
+    return tool in COORDINATE_KEYS
 
 
 def _in_button_swipe_start(
@@ -892,14 +972,25 @@ def _denied_word(guard: GuardConfig, labels: Iterable[dict[str, str]]) -> str | 
     return None
 
 
+def _custom_deny_words(guard: GuardConfig) -> tuple[str, ...] | None:
+    if guard.custom_deny or guard.deny_words != DEFAULT_DENY_WORDS:
+        return guard.deny_words
+    return None
+
+
 def label_refusal(
     guard: GuardConfig | None, labels: Iterable[dict[str, str]]
 ) -> dict[str, Any] | None:
     """Refuse a tap when any of *labels* (see :func:`guard_labels`) hits a deny word."""
     word = None if guard is None else _denied_word(guard, labels)
-    if word is None:
+    if word is None or guard is None:
         return None
-    return refusal("denied_label", word, f"guarded session: input on a {word!r} label refused")
+    return refusal(
+        "denied_label",
+        word,
+        f"guarded session: input on a {word!r} label refused",
+        deny_words=_custom_deny_words(guard),
+    )
 
 
 def unreadable_refusal(detail: str) -> dict[str, Any]:
@@ -916,6 +1007,12 @@ def build_guard_entry(tool: str, result: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Sessions
 # ---------------------------------------------------------------------------
+
+ALREADY_ACTIVE_HINT = (
+    "Call nerve_actionlog_stop first to start a new log, or call "
+    "nerve_actionlog_start with the active path and target_package to "
+    "re-arm the guard in place."
+)
 
 
 class ActionLogSession:
@@ -984,6 +1081,20 @@ class ActionLogSession:
             except (OSError, ValueError) as exc:  # closed by a racing stop
                 log.warning("action_log_write_failed", serial=self.serial, error=str(exc))
 
+    def update_guard(self, guard: GuardConfig, at: float) -> dict[str, Any]:
+        """Swap *guard* into this session and append one ``guard_updated`` line."""
+        with self._lock:
+            self.guard = guard
+            record = {
+                "type": "guard_updated",
+                "event": "guard_updated",
+                "deny_words": list(guard.deny_words),
+                "allowed_packages": sorted(guard.allowed_packages),
+                "t_session_s": round(at - self.started, 3),
+            }
+            self.write(record)
+            return record
+
     def stop_info(self) -> dict[str, Any]:
         info: dict[str, Any] = {"serial": self.serial, "path": str(self.path), "entries": self.seq}
         if self.guard is not None:
@@ -995,6 +1106,13 @@ class ActionLogSession:
             self._fh.close()
 
 
+def _can_rearm(session: ActionLogSession, path: Path, guard: GuardConfig | None) -> bool:
+    """Whether *session* can be re-armed in place with *guard* at *path*."""
+    if session.guard is None or guard is None:
+        return False
+    return session.path == path and session.guard.target_package == guard.target_package
+
+
 class ActionLogRegistry:
     """Thread-safe serial → session map, plus per-serial recording start times."""
 
@@ -1002,6 +1120,25 @@ class ActionLogRegistry:
         self._lock = threading.Lock()
         self._sessions: dict[str, ActionLogSession] = {}
         self._rec_started: dict[str, float] = {}
+
+    def _rearm_or_raise(
+        self,
+        serial: str,
+        existing: ActionLogSession,
+        path: Path,
+        guard: GuardConfig | None,
+    ) -> dict[str, Any]:
+        if not _can_rearm(existing, path, guard) or guard is None:
+            raise ActionLogError(f"action log already active on {serial}: {existing.path}")
+        existing.update_guard(guard, _clock())
+        log.info("action_log_rearmed", serial=serial, path=str(path))
+        return {
+            "serial": serial,
+            "path": str(path),
+            "started_at": existing.started_at,
+            "rearmed": True,
+            **guard.describe(),
+        }
 
     def start(
         self,
@@ -1013,8 +1150,7 @@ class ActionLogRegistry:
         path = Path(path)
         with self._lock:
             if serial in self._sessions:
-                active = self._sessions[serial].path
-                raise ActionLogError(f"action log already active on {serial}: {active}")
+                return self._rearm_or_raise(serial, self._sessions[serial], path, guard)
             session = ActionLogSession(serial, path, dict(meta or {}), guard)
             session.write(session.header())
             self._sessions[serial] = session

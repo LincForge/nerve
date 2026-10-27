@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
+
+from pydantic import Field
 
 from linc_nerve.core.contracts import require
 from linc_nerve.core.device_manager import _held_by, _resolve_owner
+from linc_nerve.core.procs import pid_alive
 from linc_nerve.mcp import _core
 from linc_nerve.mcp._core import device_tool
 
@@ -41,6 +44,61 @@ def _release_error(
     }
 
 
+def _renewal_mode(
+    renew_anonymous: bool | DeviceManager,
+    shared_owner: bool | DeviceReservation = False,
+    owner_pid: int | None = 0,
+) -> str:
+    """Determine lease renewal authority: 'daemon' if auto-renewed, else 'caller'."""
+    if not isinstance(renew_anonymous, bool):
+        mgr = renew_anonymous
+        res = shared_owner
+        r_anon = getattr(mgr, "renew_anonymous", True)
+        s_owner = res.owner == mgr.session_id if hasattr(res, "owner") else False
+        pid = owner_pid or getattr(res, "owner_pid", None) or 0
+        return _renewal_mode(r_anon, s_owner, pid)
+
+    pid = owner_pid or 0
+    if (pid > 0 and pid_alive(pid)) or (renew_anonymous and shared_owner):
+        return "daemon"
+    return "caller"
+
+
+def _reserve_result(
+    device_mgr: DeviceManager,
+    result: DeviceReservation,
+    owner_pid: int = 0,
+) -> dict[str, Any]:
+    """Success dict for ``nerve_reserve``: the lease plus whether it is
+    anonymous (owned by this process's shared session id) and renewed."""
+    shared_owner = result.owner == device_mgr.session_id
+    effective_pid = owner_pid or getattr(result, "owner_pid", None) or 0
+    renewal = _renewal_mode(
+        getattr(device_mgr, "renew_anonymous", True),
+        shared_owner,
+        effective_pid,
+    )
+    out: dict[str, Any] = {
+        "success": True,
+        "device": result.device_serial,
+        "session_id": result.session_id,
+        "timeout_seconds": result.timeout_seconds,
+        "purpose": result.purpose,
+        "owner": result.owner,
+        "shared_owner": shared_owner,
+        "renewed": result.renewed,
+        "expires_in_s": result.timeout_seconds,
+        "renewal": renewal,
+    }
+    if shared_owner:
+        out["warning"] = (
+            "anonymous lease: owned by this nerve process's session id "
+            f"{device_mgr.session_id}; every caller of this process without an owner "
+            "shares it and can renew or release it. Pass owner (CLI --owner or NERVE_OWNER)."
+        )
+    return out
+
+
 @device_tool
 def _nerve_reserve_sync(
     device: str,
@@ -67,11 +125,17 @@ def _nerve_reserve_sync(
     Args:
         device: Device serial (from nerve_discover).
         purpose: Free text describing what you're using the device for.
-        timeout_seconds: Seconds before reservation auto-expires (default 300).
-        owner: Stable caller identity; defaults to this session's id.
-        takeover: Force-claim a device held by a different owner.
+        timeout_seconds: Seconds before reservation auto-expires (default 300);
+            under the daemon, anonymous leases expire after this timeout
+            unless re-reserved (or kept alive with owner_pid).
+        owner: Stable caller identity (CLI: --owner, else $NERVE_OWNER);
+            defaults to pid:<owner_pid> if owner_pid is set, else this
+            session's id (shared by every owner-less caller).
+        takeover: Force-claim a device held by a different owner; refused
+            unless owner or owner_pid names you.
         owner_pid: Caller's own process id (0 = not supplied); the lease is
-            reaped when this process exits.
+            reaped when this process exits. Without owner, the lease is
+            owned by pid:<owner_pid> (release with that owner).
     """
     _core._ensure_initialized()
     device_mgr = require(_core._device_mgr, "device manager")
@@ -88,18 +152,14 @@ def _nerve_reserve_sync(
         return {"error": result}
     if _core._metrics is not None:
         _core._metrics.record_reserve(device)
-    return {
-        "success": True,
-        "device": result.device_serial,
-        "session_id": result.session_id,
-        "timeout_seconds": result.timeout_seconds,
-        "purpose": result.purpose,
-        "owner": result.owner,
-    }
+    return _reserve_result(_core._device_mgr, result, owner_pid=owner_pid)
 
 
 @device_tool
-def _nerve_release_sync(device: str, owner: str = "") -> dict[str, Any]:
+def _nerve_release_sync(
+    device: Annotated[str, Field(default="")],
+    owner: str = "",
+) -> dict[str, Any]:
     """Release a device reservation.
 
     USE FOR: Freeing a device when done with it.
@@ -108,9 +168,10 @@ def _nerve_release_sync(device: str, owner: str = "") -> dict[str, Any]:
     out. Pass the same owner you reserved with, if you set one.
 
     Args:
-        device: Device serial to release.
-        owner: Stable caller identity that holds the reservation; defaults
-            to this session's id.
+        device: Device serial to release (optional when the caller holds a single reservation).
+        owner: Stable caller identity that holds the reservation (CLI:
+            --owner, else $NERVE_OWNER); defaults to this session's id. A
+            lease reserved with only owner_pid is owned by pid:<owner_pid>.
     """
     _core._ensure_initialized()
     device_mgr = require(_core._device_mgr, "device manager")

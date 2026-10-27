@@ -25,6 +25,29 @@ from linc_nerve.core.scrcpy import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_scrcpy_threads():
+    """Fail any test that leaves a new ``scrcpy*`` thread alive on exit."""
+    before = set(threading.enumerate())
+    yield
+
+    def _leaked() -> list[threading.Thread]:
+        return [
+            t
+            for t in threading.enumerate()
+            if t not in before and t.name.startswith("scrcpy") and t.is_alive()
+        ]
+
+    deadline = time.monotonic() + 3.0
+    while _leaked() and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    leaked = _leaked()
+    if leaked:
+        names = ", ".join(t.name for t in leaked)
+        pytest.fail(f"leaked thread {names}")
+
+
 class TestRecvExact:
     def test_reads_exact_bytes(self) -> None:
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1035,9 +1058,8 @@ class TestScrcpyLastAccessRealWrites:
                     "real read loop never produced a frame after start()"
                 )
             finally:
-                stream._running = False
-                if stream._thread:
-                    stream._thread.join(timeout=2)
+                with patch.object(stream, "_teardown_transport"):
+                    stream.stop()
 
     def test_screenshot_pil_advances_last_access_via_real_code_path(
         self, monkeypatch
@@ -1388,7 +1410,8 @@ class TestScrcpyReapRestartRace:
             # `_running is False` and call start() before this reap finishes
             # tearing down — the exact window round-2 finding 2 describes.
             release_reap.wait(timeout=2.0)
-            real_teardown()
+            with patch("linc_nerve.core.scrcpy.subprocess.run"):
+                real_teardown()
 
         new_sock_holder: dict[str, object] = {}
 
@@ -1404,43 +1427,74 @@ class TestScrcpyReapRestartRace:
             )
             stream._thread.start()
 
-        with (
-            patch.object(stream, "_teardown_transport", side_effect=slow_teardown),
-            patch.object(stream, "start", side_effect=fake_start),
-        ):
-            stream._running = True
-            stream._sock = _InfiniteFrameSocket()
-            stream._last_access = time.monotonic()
+        try:
+            with (
+                patch.object(stream, "_teardown_transport", side_effect=slow_teardown),
+                patch.object(stream, "start", side_effect=fake_start),
+            ):
+                stream._running = True
+                stream._sock = _InfiniteFrameSocket()
+                stream._last_access = time.monotonic()
 
-            reap_thread = threading.Thread(
-                target=stream._reap, args=(999.0,), daemon=True
+                reap_thread = threading.Thread(
+                    target=stream._reap, args=(999.0,), daemon=True
+                )
+                reap_thread.start()
+                assert reap_entered.wait(timeout=2.0), "reap did not start teardown"
+
+                # screenshot_pil() races the in-flight reap. It must not observe
+                # `_running is False` until the reap has FULLY finished, so the
+                # transport it starts survives.
+                def call_screenshot() -> None:
+                    stream.screenshot_pil()
+
+                screenshot_thread = threading.Thread(target=call_screenshot, daemon=True)
+                screenshot_thread.start()
+
+                # Let the reap's teardown proceed now that both threads are racing.
+                release_reap.set()
+                reap_thread.join(timeout=3.0)
+                screenshot_thread.join(timeout=3.0)
+
+            assert "sock" in new_sock_holder, "screenshot_pil() never restarted the stream"
+            assert stream._sock is new_sock_holder["sock"], (
+                "the reap must not close a transport started AFTER it finished "
+                "tearing down — the stale reap tore down the freshly-started "
+                "transport instead of leaving it alone"
             )
-            reap_thread.start()
-            assert reap_entered.wait(timeout=2.0), "reap did not start teardown"
-
-            # screenshot_pil() races the in-flight reap. It must not observe
-            # `_running is False` until the reap has FULLY finished, so the
-            # transport it starts survives.
-            def call_screenshot() -> None:
-                stream.screenshot_pil()
-
-            screenshot_thread = threading.Thread(target=call_screenshot, daemon=True)
-            screenshot_thread.start()
-
-            # Let the reap's teardown proceed now that both threads are racing.
+            assert stream.is_running, (
+                "the stream must end up running with a live transport, not "
+                "flagged running with a transport the stale reap already killed"
+            )
+        finally:
             release_reap.set()
-            reap_thread.join(timeout=3.0)
-            screenshot_thread.join(timeout=3.0)
+            with patch.object(stream, "_teardown_transport"):
+                stream.stop()
 
-        assert "sock" in new_sock_holder, "screenshot_pil() never restarted the stream"
-        assert stream._sock is new_sock_holder["sock"], (
-            "the reap must not close a transport started AFTER it finished "
-            "tearing down — the stale reap tore down the freshly-started "
-            "transport instead of leaving it alone"
-        )
-        assert stream.is_running, (
-            "the stream must end up running with a live transport, not "
-            "flagged running with a transport the stale reap already killed"
+    def test_reap_restart_race_stops_thread_without_calling_subprocess_run(
+        self, monkeypatch
+    ) -> None:
+        """Regression (linc-nerve-twyb / reactor 29e39f9d): the restarted
+        ``scrcpy-race-restart`` read thread must not outlive the race test or
+        reach ``ScrcpyStream._teardown_transport``'s real ``subprocess.run``."""
+        subprocess_calls: list[object] = []
+
+        def record_run(*args, **kwargs):
+            subprocess_calls.append((args, kwargs))
+            return MagicMock(returncode=0)
+
+        monkeypatch.setattr("linc_nerve.core.scrcpy.subprocess.run", record_run)
+        self.test_screenshot_pil_during_reap_keeps_the_new_transport_alive(monkeypatch)
+
+        assert _wait_until(
+            lambda: not any(
+                t.name.startswith("scrcpy") and t.is_alive() for t in threading.enumerate()
+            ),
+            timeout=0.5,
+        ), "scrcpy thread still alive within 0.5s of race test finishing"
+        assert subprocess_calls == [], (
+            "restarted stream teardown must be stubbed so subprocess.run is "
+            f"never called, got: {subprocess_calls!r}"
         )
 
 

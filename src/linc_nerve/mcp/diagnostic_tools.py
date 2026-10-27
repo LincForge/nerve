@@ -14,6 +14,7 @@ from typing import Any
 
 from linc_nerve.core.android import AndroidController
 from linc_nerve.core.android_apps import _validate_shell_identifier
+from linc_nerve.core.android_ui import _validate_log_tag
 from linc_nerve.core.contracts import require
 from linc_nerve.core.inspect_helpers import (
     _detect_crashes,
@@ -25,21 +26,116 @@ from linc_nerve.core.inspect_helpers import (
 from linc_nerve.mcp import _core
 from linc_nerve.mcp._core import device_tool, global_tool
 
-# Max logcat lines to return inline.  Larger dumps go to a file.
-_LOGCAT_INLINE_MAX = 100
+# Max logcat lines / bytes to return inline.  Larger dumps go to a file.
+_LOGCAT_INLINE_MAX = 250
+_LOGCAT_INLINE_MAX_BYTES = 24 * 1024
+_LOGCAT_TAIL_LINES = 50
+_LOGCAT_TAIL_LINE_MAX_CHARS = 500
+_GREP_MAX_LEN = 200
+_GREP_WINDOW_FACTOR = 20
+_GREP_WINDOW_MIN = 2000
+_GREP_WINDOW_MAX = 20000
+_SUBSTRING_FALLBACK_WINDOW = 5000
+_PACKAGE_LIKE_RE = re.compile(r"\A[A-Za-z][\w]*(\.[A-Za-z][\w]*)+\Z")
+_LINE_TAG_RE = re.compile(
+    r"\A(?:"
+    r"\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\d+\s+[VDIWEFA]\s+([^\s:]+)\s*:"
+    r"|[VDIWEFA]/([^\s(:]+)\s*\(\s*\d+\)\s*:"
+    r"|[VDIWEFA]\s+([^\s:]+)\s*:"
+    r"|([^\s:]+)\s*:"
+    r")"
+)
+
+
+def _line_has_tag(line: str, tag: str) -> bool:
+    """Return True if a logcat line's tag field equals ``tag``."""
+    m = _LINE_TAG_RE.match(line.lstrip())
+    # Every alternative captures exactly one group, so the tag is the one non-None group.
+    return bool(m) and tag in m.groups()
+
+
+def _validate_grep(grep: str) -> dict[str, Any] | None:
+    """Validate ``grep`` parameter; return a validation_error dict if invalid."""
+    if not grep:
+        return None
+    if len(grep) > _GREP_MAX_LEN or not grep.isprintable():
+        return {
+            "error": (
+                f"Invalid grep filter: must be printable characters and <= {_GREP_MAX_LEN} chars"
+            ),
+            "validation_error": True,
+        }
+    return None
+
+
+def _read_window(lines: int, grep: str) -> int:
+    """Compute the log read window when ``grep`` is active vs inactive."""
+    if grep:
+        return min(max(int(lines) * _GREP_WINDOW_FACTOR, _GREP_WINDOW_MIN), _GREP_WINDOW_MAX)
+    return int(lines)
+
+
+def _apply_grep(raw_lines: list[str], grep: str, lines: int) -> list[str]:
+    """Filter ``raw_lines`` by case-insensitive substring ``grep`` and keep last ``lines``."""
+    if grep:
+        needle = grep.lower()
+        raw_lines = [line for line in raw_lines if needle in line.lower()]
+    return raw_lines[-lines:]
+
+
+def _matched_via(tag: str, grep: str) -> str:
+    """Return ``matched_via`` value for direct (non-package, non-fallback) logcat reads."""
+    if grep:
+        return "grep"
+    if tag:
+        return "tag"
+    return ""
+
+
+def _utf8_line_bytes(log_lines: list[str]) -> int:
+    """Return the sum of UTF-8 byte lengths across ``log_lines``."""
+    return sum(len(line.encode("utf-8")) for line in log_lines)
+
+
+def _should_spill_logcat(log_lines: list[str]) -> bool:
+    """Return True when ``log_lines`` exceeds either inline line or byte limit."""
+    if len(log_lines) > _LOGCAT_INLINE_MAX:
+        return True
+    return _utf8_line_bytes(log_lines) > _LOGCAT_INLINE_MAX_BYTES
+
+
+def _truncate_tail_line(line: str) -> str:
+    """Truncate a tail line to ``_LOGCAT_TAIL_LINE_MAX_CHARS`` chars with a trailing ``…``."""
+    if len(line) > _LOGCAT_TAIL_LINE_MAX_CHARS:
+        return f"{line[:_LOGCAT_TAIL_LINE_MAX_CHARS]}…"
+    return line
+
+
+def _build_tail_lines(log_lines: list[str]) -> list[str]:
+    """Return the last ``_LOGCAT_TAIL_LINES`` lines, each truncated at 500 chars."""
+    return [_truncate_tail_line(line) for line in log_lines[-_LOGCAT_TAIL_LINES:]]
 
 
 def _process_log_lines(device: str, platform: str, log_lines: list[str]) -> dict[str, Any]:
-    if len(log_lines) > _LOGCAT_INLINE_MAX:
+    if _should_spill_logcat(log_lines):
         path = _core._next_output_path(device, "logcat", ext="txt")
         with open(path, "w") as f:
             f.write("\n".join(log_lines))
+        tail_lines = _build_tail_lines(log_lines)
+        count = len(log_lines)
+        tail_count = len(tail_lines)
         return {
             "logcat": path,
-            "count": len(log_lines),
+            "count": count,
+            "tail_lines": tail_lines,
+            "tail_count": tail_count,
             "device": device,
             "platform": platform,
-            "hint": "Large output saved to file. Use Read tool to view.",
+            "hint": (
+                f"Full output ({count} lines) saved to {path}; "
+                f"tail_lines holds the last {tail_count}. "
+                "Read the file only if you need earlier lines."
+            ),
         }
     return {
         "lines": log_lines,
@@ -49,14 +145,149 @@ def _process_log_lines(device: str, platform: str, log_lines: list[str]) -> dict
     }
 
 
+def _format_log_result(
+    device: str,
+    platform: str,
+    log_lines: list[str],
+    matched_via: str = "",
+    fallback_hint: str = "",
+) -> dict[str, Any]:
+    """Build the logcat result and attach ``matched_via`` / a fallback ``hint`` when set."""
+    res = _process_log_lines(device, platform, log_lines)
+    if matched_via:
+        res["matched_via"] = matched_via
+    if fallback_hint:
+        existing = res.get("hint")
+        res["hint"] = f"{existing} {fallback_hint}" if existing else fallback_hint
+    return res
+
+
+def _logcat_by_package(
+    android: Any,
+    serial: str,
+    pkg: str,
+    lines: int,
+    tag_filter: str = "",
+    grep: str = "",
+    *,
+    is_fallback: bool = False,
+    pid: int | None = None,
+) -> dict[str, Any]:
+    """Filter Android logcat by package PID (shared by explicit package= and tag fallback).
+
+    The tag fallback passes the ``pid`` it already resolved; ``package=`` resolves it here.
+    """
+    try:
+        _validate_shell_identifier(pkg, "package")
+        if tag_filter:
+            _validate_log_tag(tag_filter)
+    except ValueError as exc:
+        return {"error": str(exc), "validation_error": True}
+
+    if pid is None:
+        pid = _get_android_pid(android, serial, pkg)
+    if pid is None:
+        return {
+            "error": f"package '{pkg}' is not running (no pid); launch it first or omit package",
+            "validation_error": True,
+        }
+
+    raw_lines = _read_pid_logcat(android, serial, pid, _read_window(lines, grep or tag_filter))
+    if tag_filter:
+        raw_lines = [line for line in raw_lines if _line_has_tag(line, tag_filter)]
+    log_lines = _apply_grep(raw_lines, grep, lines)
+    if is_fallback:
+        hint = (
+            f"Tag {pkg!r} matched 0 lines with exact -s filter; "
+            f"matched via package_fallback (--pid={pid})."
+        )
+        return _format_log_result(
+            serial, "android", log_lines, matched_via="package_fallback", fallback_hint=hint
+        )
+    return _format_log_result(serial, "android", log_lines, matched_via="package")
+
+
+def _logcat_tag_fallback(
+    android: Any,
+    serial: str,
+    tag: str,
+    lines: int,
+) -> dict[str, Any]:
+    """Fallback when exact ``logcat -d -s <tag>`` returns 0 lines (no package/grep)."""
+    # A package-shaped tag whose app is not running falls through to the substring search.
+    pid = _get_android_pid(android, serial, tag) if _PACKAGE_LIKE_RE.fullmatch(tag) else None
+    if pid is not None:
+        return _logcat_by_package(android, serial, tag, lines, is_fallback=True, pid=pid)
+    fb_out = android._shell(serial, f"logcat -d -t {_SUBSTRING_FALLBACK_WINDOW}")
+    raw_lines = fb_out.strip().splitlines() if fb_out.strip() else []
+    log_lines = _apply_grep(raw_lines, tag, lines)
+    hint = (
+        f"Tag {tag!r} matched 0 lines with exact -s filter; "
+        f"matched via substring_fallback (case-insensitive substring over last "
+        f"{_SUBSTRING_FALLBACK_WINDOW} lines)."
+    )
+    return _format_log_result(
+        serial, "android", log_lines, matched_via="substring_fallback", fallback_hint=hint
+    )
+
+
+def _logcat_android(
+    android: Any,
+    serial: str,
+    lines: int,
+    tag: str,
+    package: str,
+    grep: str,
+) -> dict[str, Any]:
+    if package:
+        return _logcat_by_package(android, serial, package, lines, tag_filter=tag, grep=grep)
+    output = android.logcat(serial, lines=_read_window(lines, grep), tag=tag)
+    raw_lines = output.strip().splitlines() if output.strip() else []
+    log_lines = _apply_grep(raw_lines, grep, lines)
+    if tag and not grep and not log_lines:
+        return _logcat_tag_fallback(android, serial, tag, lines)
+    return _format_log_result(serial, "android", log_lines, matched_via=_matched_via(tag, grep))
+
+
+def _logcat_ios(
+    ios: Any,
+    device: str,
+    lines: int,
+    tag: str,
+    package: str,
+    grep: str,
+) -> dict[str, Any]:
+    if package:
+        return {
+            "error": "package filter is Android-only; on iOS pass the bundle ID via tag=",
+            "validation_error": True,
+        }
+    try:
+        output = ios.get_logs(device, lines=_read_window(lines, grep), filter=tag)
+        raw_lines = output.strip().splitlines() if output.strip() else []
+        log_lines = _apply_grep(raw_lines, grep, lines)
+        return _format_log_result(device, "ios", log_lines, matched_via=_matched_via(tag, grep))
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        return {"error": f"iOS log retrieval failed: {exc}"}
+
+
 @device_tool
-def _nerve_logcat_sync(device: str, lines: int = 50, tag: str = "") -> dict[str, Any]:
+def _nerve_logcat_sync(
+    device: str,
+    lines: int = 50,
+    tag: str = "",
+    package: str = "",
+    grep: str = "",
+) -> dict[str, Any]:
     """Tail the last N lines from a device's logcat buffer or iOS system log.
 
     USE FOR: Tailing recent log lines, runtime warnings, errors, and exceptions
-        emitted by apps. Returns a static one-shot snapshot of the most recent
-        log entries from the device's main logcat buffer. Tail logs, dump
-        recent log output, read logcat messages from the buffer.
+        emitted by apps; pass package= to see one app's lines. Returns a static
+        one-shot snapshot of the most recent log entries from the device's main
+        logcat buffer. Tail logs, dump recent log output, read logcat messages
+        from the buffer.
     NOT FOR: pushing logs through a subscription channel (nerve_stream_logs).
         Reading a process's PID, memory map, or crash signature (nerve_inspect).
         Stepping through code with breakpoints (spectra_attach).
@@ -67,11 +298,19 @@ def _nerve_logcat_sync(device: str, lines: int = 50, tag: str = "") -> dict[str,
         device: Device serial (Android or iOS).
         lines: Number of recent lines to return (default 50).
         tag: Optional logcat tag (Android) or process name / bundle ID (iOS) filter.
+        package: Optional Android package name to filter by its running PID.
+        grep: Optional case-insensitive substring filter applied in Python.
 
     Returns:
         A dictionary containing the log lines from the device's buffer.
     """
-    android, _ = _core._ensure_initialized()
+    if int(lines) < 1:
+        return {"error": "lines must be >= 1", "validation_error": True}
+    grep_err = _validate_grep(grep)
+    if grep_err:
+        return grep_err
+
+    android, ios = _core._ensure_initialized()
     dev, platform = _core._resolve_device(device)
     if dev is None:
         return {"error": platform}
@@ -81,21 +320,10 @@ def _nerve_logcat_sync(device: str, lines: int = 50, tag: str = "") -> dict[str,
         return guard
 
     if platform != "android":
-        # iOS log support via simctl/devicectl
-        _, ios = _core._ensure_initialized()
-        try:
-            output = ios.get_logs(device, lines=lines, filter=tag)
-            log_lines = output.strip().splitlines()[-lines:] if output.strip() else []
-            return _process_log_lines(device, "ios", log_lines)
-        except ValueError as exc:
-            return {"error": str(exc)}
-        except Exception as exc:
-            return {"error": f"iOS log retrieval failed: {exc}"}
+        return _logcat_ios(ios, device, lines, tag, package, grep)
 
     try:
-        output = android.logcat(device, lines=lines, tag=tag)
-        log_lines = output.strip().splitlines()[-lines:] if output.strip() else []
-        return _process_log_lines(device, "android", log_lines)
+        return _logcat_android(android, device, lines, tag, package, grep)
     except Exception as exc:
         return {"error": f"Logcat failed: {exc}"}
 
@@ -302,12 +530,16 @@ def _get_android_pid(android: Any, serial: str, package: str) -> int | None:
     return None
 
 
+def _read_pid_logcat(android: Any, serial: str, pid: int, window: int) -> list[str]:
+    log_out = android._shell(serial, f"logcat -d -t {int(window)} --pid={int(pid)}", timeout=10)
+    return log_out.strip().splitlines() if log_out.strip() else []
+
+
 def _get_android_logs(android: Any, serial: str, pid: int | None, lines: int) -> list[str]:
     try:
         if pid is not None:
-            log_out = android._shell(serial, f"logcat -d -t {lines} --pid={pid}", timeout=10)
-        else:
-            log_out = android.logcat(serial, lines=lines)
+            return _read_pid_logcat(android, serial, pid, lines)[-lines:]
+        log_out = android.logcat(serial, lines=lines)
         return log_out.strip().splitlines()[-lines:] if log_out.strip() else []
     except Exception:
         return []

@@ -27,6 +27,7 @@ dependencies = [
     "linc-cli-kit>=0.1",
     "linc-device-kit>=1.0",
     "mcp>=1.0.0",
+    "meta-sam-parser>=0.1.0",
     "pillow>=11.0",
     "pyyaml>=6.0",
     "rich>=13.7.0",

@@ -7,86 +7,17 @@ out in Batch 4 N5 to keep this file under the 400-line advisory).
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
+from linc_nerve.core.grounding import (
+    VISUAL_GROUNDING_HINT,
+    ground_visual_targets,
+    render_grounded_overlay,
+    should_suggest_visual_grounding,
+)
 from linc_nerve.mcp import _core
 from linc_nerve.mcp._core import device_tool
-
-# ---------------------------------------------------------------------------
-# Scroll-and-merge helper (used by nerve_elements with scroll_depth)
-# ---------------------------------------------------------------------------
-
-
-def _scroll_and_merge(
-    ctrl: Any,
-    device: str,
-    elements: list[dict],
-    scroll_depth: int,
-) -> dict[str, Any]:
-    bounds_re = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
-    scroll_bounds = None
-    for el in elements:
-        if el.get("scrollable"):
-            m = bounds_re.match(el.get("bounds", ""))
-            if m:
-                scroll_bounds = (
-                    int(m.group(1)),
-                    int(m.group(2)),
-                    int(m.group(3)),
-                    int(m.group(4)),
-                )
-                break
-
-    if scroll_bounds is None:
-        return {
-            "elements": elements,
-            "count": len(elements),
-            "device": device,
-            "scroll_steps": 0,
-            "note": "no scrollable container found",
-        }
-
-    x1, y1, x2, y2 = scroll_bounds
-    cx = (x1 + x2) // 2
-    margin = (y2 - y1) // 10
-    swipe_from_y = y2 - margin
-    swipe_to_y = y1 + margin
-
-    seen: set[tuple[str, str, str]] = set()
-    merged: list[dict] = []
-    for el in elements:
-        key = (el.get("id", ""), el.get("text", ""), el.get("bounds", ""))
-        if key not in seen:
-            seen.add(key)
-            merged.append(el)
-
-    actual_steps = 0
-    for _ in range(scroll_depth):
-        ctrl.swipe(device, cx, swipe_from_y, cx, swipe_to_y, 300)
-        new_elements = ctrl.elements(device)
-        new_count = 0
-        for el in new_elements:
-            key = (el.get("id", ""), el.get("text", ""), el.get("bounds", ""))
-            if key not in seen:
-                seen.add(key)
-                merged.append(el)
-                new_count += 1
-        actual_steps += 1
-        if new_count == 0:
-            break
-
-    return {
-        "elements": merged,
-        "count": len(merged),
-        "device": device,
-        "scroll_steps": actual_steps,
-    }
-
-
-# ---------------------------------------------------------------------------
-# UI Hierarchy
-# ---------------------------------------------------------------------------
+from linc_nerve.mcp._ui_helpers import _scroll_and_merge
 
 
 @device_tool
@@ -151,15 +82,21 @@ def _nerve_elements_sync(
         if scroll_depth > 0:
             return _scroll_and_merge(ctrl, device, elements, scroll_depth)
 
-        return {
+        out: dict[str, Any] = {
             "elements": elements,
             "count": len(elements),
             "device": device,
         }
+        if should_suggest_visual_grounding(elements):
+            out["visual_grounding_hint"] = VISUAL_GROUNDING_HINT
+        return out
     except NotImplementedError as exc:
         return {"error": str(exc)}
     except Exception as exc:
-        return {"error": f"Element dump failed: {exc}"}
+        return {
+            "error": f"Element dump failed: {exc}",
+            "visual_grounding_hint": VISUAL_GROUNDING_HINT,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +234,9 @@ def _nerve_state_sync(device: str, track_changes: bool = False) -> Any:
         state["screenshot"] = path
         state.update(_core._screenshot_geometry(screenshot_bytes, state.get("screen_size", {})))
 
+    if should_suggest_visual_grounding(state.get("elements"), state.get("elements_error")):
+        state["visual_grounding_hint"] = VISUAL_GROUNDING_HINT
+
     return state
 
 
@@ -391,3 +331,65 @@ def _nerve_diff_sync(device: str) -> Any:
         result["screenshot"] = path
 
     return result
+
+
+@device_tool
+def _nerve_ground_sync(
+    device: str,
+    prompt: str,
+    annotate: bool = False,
+) -> dict[str, Any]:
+    """Locate UI controls visually by natural-language concept prompt using Meta SAM 3.1.
+
+    USE FOR: grounding visual UI elements when nerve_elements / nerve_state
+        return an empty or unlabelled hierarchy (uiautomator dump killed,
+        custom Compose/Flutter/WebView canvas, or unlabelled icon buttons).
+    NOT FOR: standard native screens where nerve_elements already returns
+        labelled bounds (reach for nerve_elements / nerve_state first).
+    TIP: returns physical device coordinates ready for nerve_tap(x, y), or
+        pass prompt directly to nerve_tap(device, prompt=...).
+
+    Args:
+        device: Device serial.
+        prompt: Natural-language description of the visual UI target to segment.
+        annotate: Save and return a green mask/centroid overlay PNG when True.
+
+    Returns:
+        Dict with count, targets (bounds, center, confidence), and top_target.
+    """
+    _core._ensure_initialized()
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {"error": "prompt must be a non-empty string", "validation_error": True}
+
+    dev, platform = _core._resolve_device(device)
+    if dev is None:
+        return {"error": platform}
+
+    guard = _core._check_guard(device)
+    if guard:
+        return guard
+
+    ctrl = _core._get_controller(platform)
+    try:
+        png_bytes = ctrl.screenshot(device)
+        screen_size = ctrl.get_screen_size(device) if hasattr(ctrl, "get_screen_size") else None
+        targets = ground_visual_targets(png_bytes, prompt.strip(), screen_size=screen_size)
+        out: dict[str, Any] = {
+            "device": device,
+            "prompt": prompt.strip(),
+            "count": len(targets),
+            "targets": targets,
+            "top_target": targets[0] if targets else None,
+        }
+        if screen_size:
+            out["screen_size"] = screen_size
+        if annotate:
+            overlay_bytes = render_grounded_overlay(png_bytes, targets, screen_size=screen_size)
+            path = _core._next_output_path(device, "grounded")
+            with open(path, "wb") as f:
+                f.write(overlay_bytes)
+            out["screenshot"] = path
+            out[_core._INLINE_IMAGE_KEY] = overlay_bytes
+        return out
+    except Exception as exc:
+        return {"error": f"Visual grounding failed: {exc}"}

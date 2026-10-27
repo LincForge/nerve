@@ -9,12 +9,18 @@ from linc_nerve.mcp._core import device_tool
 
 
 @device_tool
-def _nerve_tap_sync(device: str, x: int, y: int) -> dict[str, Any]:
-    """Tap a single point on the device display at known x/y coordinates.
+def _nerve_tap_sync(
+    device: str,
+    x: int | None = None,
+    y: int | None = None,
+    prompt: str = "",
+) -> dict[str, Any]:
+    """Tap a single point on the device display at known x/y coordinates or by visual prompt.
 
     A one-shot single-touch gesture: routes a click to one specific pixel
     position. Use when an agent already knows where to tap — bounds from
-    nerve_elements, an annotated screenshot, or a fixed UI position.
+    nerve_elements, an annotated screenshot, a fixed UI position, or a
+    semantic visual concept prompt grounded via SAM 3.1 when the UI tree is empty.
 
     USE FOR: tapping a single point on the screen, clicking a coordinate,
         pressing a single position on the device display, single touch
@@ -26,12 +32,14 @@ def _nerve_tap_sync(device: str, x: int, y: int) -> dict[str, Any]:
         pressing a hardware key like HOME/BACK/ENTER (use nerve_key instead),
         or a multi-second hold (use nerve_long_press instead).
     TIP: call nerve_elements first if you need an element's bounds, then
-        tap the rect center. Returns ~30-80 tokens.
+        tap the rect center. When the UI tree is empty or unlabelled, pass
+        prompt='<visual description>' to ground via SAM 3.1. Returns ~30-80 tokens.
 
     Args:
         device: Device serial.
-        x: X coordinate in pixels.
-        y: Y coordinate in pixels.
+        x: X coordinate in pixels (optional when prompt is provided).
+        y: Y coordinate in pixels (optional when prompt is provided).
+        prompt: Visual concept description grounded via SAM 3.1 when x and y are omitted.
 
     Returns:
         Dict with success/action/x/y on success, or {"error": ...} on failure.
@@ -47,7 +55,12 @@ def _nerve_tap_sync(device: str, x: int, y: int) -> dict[str, Any]:
     ctrl = _core._get_controller(platform)
     try:
         ctrl.tap(device, x, y)
-        return {"success": True, "action": "tap", "x": x, "y": y}
+        res: dict[str, Any] = {"success": True, "action": "tap", "x": x, "y": y}
+        tap_key = (device, int(x), int(y)) if (x is not None and y is not None) else None
+        grounded = _core._LAST_GROUNDED_TAP.pop(tap_key, None) if tap_key is not None else None
+        if grounded is not None:
+            res["grounded"] = grounded
+        return res
     except NotImplementedError as exc:
         return {"error": str(exc)}
     except Exception as exc:
@@ -105,11 +118,15 @@ def _nerve_long_press_sync(
 @device_tool
 def _nerve_swipe_sync(
     device: str,
-    start_x: int,
-    start_y: int,
-    end_x: int,
-    end_y: int,
+    start_x: int | None = None,
+    start_y: int | None = None,
+    end_x: int | None = None,
+    end_y: int | None = None,
     duration_ms: int = 300,
+    x1: int | None = None,
+    y1: int | None = None,
+    x2: int | None = None,
+    y2: int | None = None,
 ) -> dict[str, Any]:
     """Two-point gesture from one xy coordinate to another — swipe, drag, or scroll.
 
@@ -123,14 +140,18 @@ def _nerve_swipe_sync(
 
     Args:
         device: Device serial.
-        start_x: Start X coordinate.
-        start_y: Start Y coordinate.
-        end_x: End X coordinate.
-        end_y: End Y coordinate.
-        duration_ms: Swipe duration in milliseconds (default 300).
+        start_x: Start X.
+        start_y: Start Y.
+        end_x: End X.
+        end_y: End Y.
+        duration_ms: Duration in ms (default 300).
+        x1: Alias for start_x.
+        y1: Alias for start_y.
+        x2: Alias for end_x.
+        y2: Alias for end_y.
 
     Returns:
-        Dict with success/action/from/to on success, or {"error": ...} on failure.
+        Dict with success/action/from/to, or {"error": ...}.
     """
     dev, platform = _core._resolve_device(device)
     if dev is None:
@@ -204,7 +225,7 @@ def _scrub_secret(message: str, text: str, secret: bool) -> str:
 
 
 @device_tool
-def _nerve_key_sync(device: str, key: str) -> dict[str, Any]:
+def _nerve_key_sync(device: str, key: str = "", keycode: str = "") -> dict[str, Any]:
     """Press a hardware/system key.
 
     USE FOR: HOME, BACK, ENTER, VOLUME_UP, VOLUME_DOWN, POWER, TAB, DELETE.
@@ -214,6 +235,7 @@ def _nerve_key_sync(device: str, key: str) -> dict[str, Any]:
     Args:
         device: Device serial.
         key: Key name (HOME, BACK, ENTER, etc.).
+        keycode: Alias for key (HOME, BACK, ENTER, etc.).
     """
     dev, platform = _core._resolve_device(device)
     if dev is None:

@@ -62,6 +62,7 @@ __all__ = [
     "server_available",
     "shlex",
     "subprocess",
+    "validate_launch_uri",
 ]
 
 # Minimum screenshot size in bytes to consider valid (API 35 transparency issue)
@@ -132,7 +133,10 @@ def _ready_adb_serials(client: Any) -> tuple[str, ...]:
 # AndroidController is composed from sibling mixin modules (split in #53). The
 # mixins reach this module's patched globals via ``_android.<name>`` so the
 # suite's ``patch("linc_nerve.core.android.*")`` calls still take effect.
-from .android_apps import _AppsMixin  # noqa: E402
+# ``validate_launch_uri`` is re-exported so callers outside core import it from
+# here: importing ``core.android_apps`` first is a circular-import error (see the
+# ``_ROUTER_IDENTIFIER_RE`` note in daemon/http_router.py).
+from .android_apps import _AppsMixin, validate_launch_uri  # noqa: E402
 from .android_input import _InputMixin  # noqa: E402
 from .android_network import _NetworkMixin  # noqa: E402
 from .android_reliability import _ReliabilityMixin  # noqa: E402

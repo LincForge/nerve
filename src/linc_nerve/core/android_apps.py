@@ -27,6 +27,24 @@ from . import android as _android
 # string starts a second command. ``\Z`` keeps a stray ``.match`` safe too.
 _SAFE_IDENTIFIER_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9_.]*\Z")
 _ACTIVITY_RE = re.compile(r"\A[A-Za-z_.][A-Za-z0-9_.$]*\Z")
+# Deep-link URIs go into ``am start -d`` (Android) and ``simctl openurl`` / WDA
+# ``/url`` (iOS). The grammar is an RFC 3986 scheme followed only by RFC 3986
+# unreserved / reserved / percent characters: no whitespace, no control
+# characters, no quotes other than the sub-delim ``'``, no backslash or
+# backtick. ``&`` is legal, so multi-param deep links pass (finding 7). Applied
+# with ``fullmatch``; ``_q(uri)`` quoting stays as the second layer.
+_URI_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9+.-]*:[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+\Z")
+_URI_MAX_LEN = 2048
+
+
+def validate_launch_uri(uri: str) -> None:
+    """Raise ``ValueError`` unless ``uri`` is an RFC 3986-shaped deep link (<= 2048 chars)."""
+    if len(uri) > _URI_MAX_LEN or not _URI_RE.fullmatch(uri):
+        raise ValueError(
+            f"Invalid uri {uri!r}: must be an RFC 3986 URI (scheme ':' then only "
+            f"unreserved/reserved/percent-encoded characters; no whitespace, control "
+            f"characters, quotes, backslash or backtick) of at most {_URI_MAX_LEN} characters"
+        )
 
 
 def _q(token: str) -> str:
@@ -202,6 +220,7 @@ class _AppsMixin:
             _validate_activity(activity)
         extra_flags = self._format_extras(extras)
         if uri:
+            validate_launch_uri(uri)
             self._shell(
                 serial,
                 self._with_extras(

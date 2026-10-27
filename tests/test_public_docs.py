@@ -161,6 +161,26 @@ def test_security_replaces_the_review_stub_with_review_summaries_and_hashes() ->
     assert len(sha256_hashes) >= 2
 
 
+def test_security_release_candidate_verification_names_public_tag_and_commit() -> None:
+    security = (REPO / "SECURITY.md").read_text()
+    assert "to be exported" not in security
+    assert "attached to the v0.1.0 release" not in security
+    assert "### Release candidate verification" in security
+    rc_section = security.split("### Release candidate verification", 1)[1]
+    assert "LincForge/nerve" in rc_section
+    assert "v0.1.0" in rc_section
+    commit_match = re.search(r"commit `([0-9a-f]{12,40})`", rc_section)
+    assert commit_match is not None
+    # Published v0.1.0 identifiers (tag object on LincForge/nerve, PyPI wheel digest).
+    assert "547786321703b7c8640e3f8a610e34f561fe7c9e" in rc_section
+    assert "321e50e2aba0e668107b364a94852ee7796b42c1" in rc_section
+    assert "747798cf8c869e4e0f6d49426faada97221cfd55e70fef540afa3fe2d949ca19" in rc_section
+    # The pre-publication placeholder sentence is gone, the timestamp explanation stays.
+    assert "After v0.1.0 is published" not in rc_section
+    assert "records each file's timestamp" in rc_section
+    assert "pip download linc-nerve==0.1.0" in rc_section
+
+
 def test_changelog_has_first_public_release_section() -> None:
     assert re.search(r"^## \[0\.1\.0\]", (REPO / "CHANGELOG.md").read_text(), re.M)
 
@@ -204,3 +224,10 @@ def test_pyproject_project_urls_point_at_the_public_repo() -> None:
     assert urls["Homepage"] == PUBLIC_REPO
     assert urls["Source"] == PUBLIC_REPO
     assert urls["Issues"] == f"{PUBLIC_REPO}/issues"
+
+
+def test_readme_cross_links_sibling_public_repos() -> None:
+    targets = set(_readme_link_targets())
+    assert "https://github.com/LincForge/crucible" in targets
+    assert "https://github.com/LincForge/spectra" in targets
+    assert "https://github.com/LincForge/mobile-agent-bench" in targets

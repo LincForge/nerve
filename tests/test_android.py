@@ -995,10 +995,10 @@ class TestAndroidAppLifecycle:
         ]
 
     def test_launch_with_uri_space_and_semicolon_survives_shell(self) -> None:
-        """A URI with a space and a `;` must arrive at the device as one literal arg.
+        """A URI with a percent-encoded space and a `;` must arrive at the device
+        as one literal arg.
 
-        An unquoted space would split the URI into two argv words, and an
-        unquoted `;` would terminate the `am start` command and start a new
+        An unquoted `;` would terminate the `am start` command and start a new
         one. Fails pre-fix.
         """
         ctrl = AndroidController()
@@ -1007,7 +1007,7 @@ class TestAndroidAppLifecycle:
         mock_client.device.return_value = mock_device
         ctrl._client = mock_client
 
-        uri = "app://navigate?screen=two words;rm -rf /tmp"
+        uri = "app://navigate?screen=two%20words;rm=-rf"
         ctrl.launch("ABC", "com.app", uri=uri)
         cmd = mock_device.shell.call_args.args[0]
         assert _sh_tokenize(cmd) == [

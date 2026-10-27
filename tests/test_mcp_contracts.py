@@ -101,6 +101,13 @@ class TestNerveReserveContract:
                 "timeout_seconds",
                 "purpose",
                 "owner",
+                # linc-nerve-jtt8: anonymous-lease flag + renewal report
+                "shared_owner",
+                "renewed",
+                "expires_in_s",
+                "warning",
+                # linc-nerve-l7pm: lease renewal authority
+                "renewal",
             }
             assert result["success"] is True
             assert isinstance(result["device"], str)
@@ -113,6 +120,10 @@ class TestNerveReserveContract:
             assert result["timeout_seconds"] == 60
             # linc-nerve-enz.3: no owner supplied -> defaults to this session's id
             assert result["owner"] == result["session_id"]
+            assert result["shared_owner"] is True
+            assert result["renewed"] is False
+            assert result["expires_in_s"] == 60
+            assert result["renewal"] == "daemon"
         finally:
             mgr.close()
 

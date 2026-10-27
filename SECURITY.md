@@ -55,6 +55,7 @@ Results: 37 checks performed; 28 PASS, 9 FAIL (0 High, 1 Medium, 8 Low). All 9 f
 The reviewed v0.1.0 candidate contains all fixes above:
 - Source: private linc-nerve commit `ff33e7b` (tree `04abc4c39af9…`). Commits after it and before the v0.1.0 tag change only this file and tests, not the package.
 - Reviewed candidate wheel SHA-256: `931663ad655060222760af5c3e98d5de9350cdd5045ee43ba47dce1786054c81`
-- The wheel published on PyPI will have a different SHA-256 even though its contents are the same, because a wheel records each file's timestamp and the published build's timestamps differ from the candidate's.
-- After v0.1.0 is published, this section names the public v0.1.0 tag, its commit, and the SHA-256 of the wheel PyPI serves. To check that hash: `pip download linc-nerve==0.1.0 --no-deps -d .` then `shasum -a 256 linc_nerve-0.1.0-py3-none-any.whl`.
-
+- Public release: tag `v0.1.0` of LincForge/nerve, commit `547786321703b7c8640e3f8a610e34f561fe7c9e` (tree `321e50e2aba0e668107b364a94852ee7796b42c1`), exported from private commit `c40f9be`. Its `src` tree (`d529522e15dd…`) is the same as the reviewed candidate's at `ff33e7b`.
+- Published wheel SHA-256 (PyPI, `linc_nerve-0.1.0-py3-none-any.whl`): `747798cf8c869e4e0f6d49426faada97221cfd55e70fef540afa3fe2d949ca19`
+- The published wheel's SHA-256 differs from the candidate's even though its contents are the same, because a wheel records each file's timestamp and the published build's timestamps differ from the candidate's.
+- Verify: `pip download linc-nerve==0.1.0 --no-deps -d .` then `shasum -a 256 linc_nerve-0.1.0-py3-none-any.whl`, and compare the result with the published hash above.
