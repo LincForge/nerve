@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -485,10 +486,21 @@ class TestStopUsesStoredPid:
     def test_uses_stored_pid(self) -> None:
         mgr = EmulatorManager()
         mgr._pids["emulator-5554"] = 999
+        # Fake clock: the 10 s disappearance wait + 2 s post-kill pause advance
+        # virtual time instead of sleeping (this test used to take ~12 s).
+        clock = [1000.0]
+
+        def fake_sleep(seconds: float) -> None:
+            clock[0] += seconds
+
         with (
             patch.object(mgr, "_run") as mock_run,
             patch.object(mgr, "_find_emulator_pid") as mock_find,
             patch("os.kill") as mock_kill,
+            patch(
+                "linc_nerve.core.emulator.time",
+                SimpleNamespace(monotonic=lambda: clock[0], sleep=fake_sleep, time=time.time),
+            ),
         ):
             # emu kill, then adb devices still shows it (forces PID fallback)
             mock_run.side_effect = [

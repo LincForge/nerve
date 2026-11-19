@@ -37,8 +37,7 @@ def _validate_log_tag(tag: str) -> None:
 # Known automation drivers that hold the device's single UiAutomation
 # connection. While one is alive, any new `uiautomator dump` is SIGKILLed
 # by the system ("Killed", rc 137). A grid run left dev.mobile.maestro
-# alive on the bench phone and blinded every subsequent nerve session
-# (reactor 8bba730a / 280bbee7; same family as 44d68b62). These exact
+# alive on the bench phone and blinded every subsequent nerve session. These exact
 # process names are safe to force-stop — they are test drivers, never user
 # apps. NOTE: com.google.android.apps.wearables.maestro.companion (Pixel
 # Watch companion) is an unrelated Google app and must never match.
@@ -95,10 +94,9 @@ _RECOVERY_AUX_TIMEOUT_S = 5
 _RECOVERY_DEADLINE_S = 45.0
 
 # A dump can end with `</hierarchy>` (so `_dump_hierarchy` returns it) yet
-# still fail `ET.fromstring` — observed 12x in 73s on the Pixel Watch 2 under
-# load (reactor: 2026-07-14, role: watch bench). Retry the full dump a
-# couple of times with a short backoff before giving up; never return []
-# (reactor 8bba730a: silent `[]` on failure blinded agents).
+# still fail `ET.fromstring` — observed 12x in 73s on a watch under
+# load. Retry the full dump a couple of times with a short backoff before
+# giving up; never return [] (silent `[]` on failure blinded agents).
 _HIERARCHY_PARSE_MAX_ATTEMPTS = 3
 _HIERARCHY_PARSE_RETRY_BACKOFF_S = 0.05
 
@@ -139,6 +137,14 @@ ELEMENT_NODE_CAP = 80
 # its controller overlay (linc-nerve-fv0; 10/10 runs, ~12.2 s raw). Not a
 # UiAutomation holder conflict: no reboot remedy.
 _IDLE_STATE_ERROR = "could not get idle state"
+_NULL_ROOT_NODE_ERROR = "null root node"
+_WAKEUP_KEYEVENT_CMD = "input keyevent 224"
+_DOZING_REMEDY = "the display may be dozing/asleep (wake it: nerve key WAKEUP)"
+_HOLDER_REMEDY = (
+    "another process may hold the device's single UiAutomation "
+    "connection (leaked instrumentation/test driver); stop it or "
+    "reboot the device"
+)
 
 
 def _dump_failure_remedy(out: str, killed: list[str]) -> str:
@@ -155,11 +161,9 @@ def _dump_failure_remedy(out: str, killed: list[str]) -> str:
             f"force-stopped leaked UiAutomation holder(s) {killed} but the dump "
             "still fails — reboot the device"
         )
-    return (
-        "another process may hold the device's single UiAutomation "
-        "connection (leaked instrumentation/test driver); stop it or "
-        "reboot the device"
-    )
+    if _NULL_ROOT_NODE_ERROR in out.lower():
+        return f"{_DOZING_REMEDY}; {_HOLDER_REMEDY}"
+    return _HOLDER_REMEDY
 
 
 def _at_cap(out: list[dict], max_nodes: int | None) -> bool:
@@ -343,6 +347,7 @@ class _UiMixin:
         (auto-reboot is deliberately NOT performed in-call: this runs under
         a 90s tool ceiling and a reboot takes minutes).
         """
+        deadline = _android.time.monotonic() + _RECOVERY_DEADLINE_S
         try:
             out = self._shell(serial, "uiautomator dump /dev/tty")
         except _RECOVERY_CAUGHT_ERRORS as exc:
@@ -371,11 +376,61 @@ class _UiMixin:
                 _android.logger.info("uiautomator_dump_recovered", serial=serial, holders=killed)
                 return out[: end_tag + len("</hierarchy>")]
 
+        recovered = self._recover_from_dozing_dump(serial, out, killed, deadline)
+        if recovered is not None:
+            return recovered
+
         detail = out.strip().splitlines()[0][:120] if out.strip() else "<empty output>"
         raise UiHierarchyUnavailableError(
             f"uiautomator dump failed on {serial} (output: {detail!r}); "
             f"{_dump_failure_remedy(out, killed)}"
         )
+
+    def _probe_wakefulness(self, serial: str, deadline: float) -> _android.Wakefulness:
+        """Read ``dumpsys power`` wakefulness once if within ``deadline``; UNKNOWN on error."""
+        if _android.time.monotonic() >= deadline:
+            return _android.Wakefulness.UNKNOWN
+        try:
+            power_out = self._shell(serial, "dumpsys power", timeout=_RECOVERY_AUX_TIMEOUT_S)
+            return _android.parse_power(power_out)
+        except Exception:
+            return _android.Wakefulness.UNKNOWN
+
+    def _retry_dump_after_wake(self, serial: str, deadline: float) -> str | None:
+        """Run the single post-wake ``uiautomator dump`` retry within ``deadline``."""
+        retry_timeout = self._recovery_dump_timeout(deadline)
+        if retry_timeout is None:
+            return None
+        try:
+            out = self._shell(serial, "uiautomator dump /dev/tty", timeout=retry_timeout)
+        except Exception:
+            return None
+        end_tag = out.rfind("</hierarchy>")
+        if end_tag <= 0:
+            return None
+        _android.logger.info(
+            "uiautomator_dump_recovered",
+            serial=serial,
+            reason="display_woken",
+        )
+        return out[: end_tag + len("</hierarchy>")]
+
+    def _recover_from_dozing_dump(
+        self, serial: str, out: str, killed: list[str], deadline: float
+    ) -> str | None:
+        """Wake an asleep/dozing display once and retry a null-root-node dump once."""
+        if killed or _NULL_ROOT_NODE_ERROR not in out.lower():
+            return None
+        wake = self._probe_wakefulness(serial, deadline)
+        if wake not in (_android.Wakefulness.ASLEEP, _android.Wakefulness.DOZING):
+            return None
+        if _android.time.monotonic() >= deadline:
+            return None
+        try:
+            self._shell(serial, _WAKEUP_KEYEVENT_CMD, timeout=_RECOVERY_AUX_TIMEOUT_S)
+        except Exception:
+            return None
+        return self._retry_dump_after_wake(serial, deadline)
 
     def _recovery_dump_timeout(self, deadline: float) -> int | None:
         """Bound a recovery retry-dump call's timeout to the remaining budget.
@@ -542,14 +597,7 @@ class _UiMixin:
         # non-XML branch in ``_dump_hierarchy``, with the original timeout
         # context preserved so the log/exception still names the hang.
         detail = out.strip().splitlines()[0][:120] if out.strip() else "<empty output>"
-        remedy = (
-            f"force-stopped leaked UiAutomation holder(s) {killed} but the dump "
-            "still fails — reboot the device"
-            if killed
-            else "another process may hold the device's single UiAutomation "
-            "connection (leaked instrumentation/test driver); stop it or "
-            "reboot the device"
-        )
+        remedy = _dump_failure_remedy(out, killed)
         raise UiHierarchyUnavailableError(
             f"uiautomator dump timed out on {serial} then failed on retry "
             f"(output: {detail!r});{orphan_note} {remedy}"

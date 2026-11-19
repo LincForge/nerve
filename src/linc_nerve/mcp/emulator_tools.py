@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from linc_nerve.core.adb_health import adb_server_config_error
 from linc_nerve.core.adb_path import describe_emulator_probe_locations, resolve_emulator_path
 from linc_nerve.core.contracts import require
 from linc_nerve.core.emulator_console import validate_sensor_type
@@ -50,6 +51,7 @@ def _nerve_emulator_list_sync() -> dict[str, Any]:
     try:
         # Android AVDs
         avds = emulator.list_avds()
+        refused = adb_server_config_error()
         virtual_devices = []
         for a in avds:
             virtual_devices.append(
@@ -60,6 +62,7 @@ def _nerve_emulator_list_sync() -> dict[str, Any]:
                     # Android avd list doesn't easily expose form factor
                     "device_type": "emulator",
                     "state": a.state,
+                    "running": a.state == "running",
                 }
             )
 
@@ -82,6 +85,8 @@ def _nerve_emulator_list_sync() -> dict[str, Any]:
             "running": sum(1 for d in virtual_devices if d["state"] == "running"),
             "stopped": sum(1 for d in virtual_devices if d["state"] == "stopped"),
         }
+        if refused is not None:
+            response["adb_refused"] = refused
 
         response.update(_android_sdk_status_fields())
 
@@ -159,6 +164,10 @@ def _nerve_emulator_stop_sync(device: str) -> dict[str, Any]:
     Args:
         device: Emulator serial (e.g., "emulator-5554") or iOS Simulator UDID.
     """
+    refusal = _core._device_policy_refusal(device, allow_discover=False)
+    if refusal is not None:
+        return refusal
+
     _core._ensure_initialized()
     emulator = require(_core._emulator, "emulator manager")
     ios = require(_core._ios, "iOS controller")
@@ -215,6 +224,10 @@ def _nerve_inject_sensor_sync(
         z: Z-axis value (default 9.81 for gravity).
     """
     validate_sensor_type(sensor_type)  # security review M1 — before any device I/O
+    refusal = _core._device_policy_refusal(device, allow_discover=False)
+    if refusal is not None:
+        return refusal
+
     _core._ensure_initialized()
     android = require(_core._android, "Android controller")
 

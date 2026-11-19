@@ -381,15 +381,23 @@ class WDAManager:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
-    def get_or_start(self, serial: str, *, is_physical: bool = False) -> WDASession:
-        """Get an existing healthy session or start a new one."""
+    def running(self, serial: str) -> WDASession | None:
+        """Return an existing running and healthy session, or None without starting one."""
         session = self._sessions.get(serial)
         if session and session.is_running and session._is_healthy():
             return session
+        return None
+
+    def get_or_start(self, serial: str, *, is_physical: bool = False) -> WDASession:
+        """Get an existing healthy session or start a new one."""
+        session = self.running(serial)
+        if session is not None:
+            return session
 
         # Clean up dead session if any
-        if session:
-            session.stop()
+        dead = self._sessions.get(serial)
+        if dead:
+            dead.stop()
 
         port = _allocate_port(serial)
         session = WDASession(serial, port, is_physical=is_physical)

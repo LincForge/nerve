@@ -16,11 +16,26 @@ directly here.
 from __future__ import annotations
 
 import contextlib
+import re
 import socket
 import struct
 
 from . import scrcpy as _scrcpy
 from .contracts import require
+from .scrcpy import nerve_scid, scid_socket_name  # noqa: F401
+
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _parse_sha256(stdout: str) -> str | None:
+    """Extract a 64-char lowercase hex SHA-256 digest from ``sha256sum`` stdout."""
+    tokens = stdout.split()
+    if not tokens:
+        return None
+    digest = tokens[0]
+    if _SHA256_RE.fullmatch(digest) is None:
+        return None
+    return digest
 
 
 class _StreamServerMixin:
@@ -76,8 +91,60 @@ class _StreamServerMixin:
     # connect/send plumbing above (_connect_control, send_control) is kept for a
     # possible future re-enable; the message-packing layer was removed (T12).
 
+    def _remote_server_size(self) -> int | None:
+        """Return remote jar size in bytes via ``wc -c``, or None if missing/unreadable."""
+        try:
+            result = _scrcpy.subprocess.run(
+                [_scrcpy.ADB_PATH, "-s", self.serial, "shell", f"wc -c < {_scrcpy._DEVICE_PATH}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return int(result.stdout.strip())
+        except (
+            _scrcpy.subprocess.TimeoutExpired,
+            ValueError,
+            _scrcpy.subprocess.CalledProcessError,
+            OSError,
+        ):
+            return None
+
+    def _remote_server_sha256(self) -> str | None:
+        """Return remote jar 64-char hex sha256 via ``sha256sum``, or None if unreadable."""
+        try:
+            result = _scrcpy.subprocess.run(
+                [
+                    _scrcpy.ADB_PATH,
+                    "-s",
+                    self.serial,
+                    "shell",
+                    f"sha256sum {_scrcpy._DEVICE_PATH}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (
+            _scrcpy.subprocess.TimeoutExpired,
+            _scrcpy.subprocess.CalledProcessError,
+            OSError,
+        ):
+            return None
+        return _parse_sha256(result.stdout)
+
+    def _server_push_reason(self, local_size: int, local_sha256: str) -> str | None:
+        """Return None when the device jar matches size and sha256, else the push reason."""
+        if self._remote_server_size() != local_size:
+            return "size_mismatch"
+        remote_sha = self._remote_server_sha256()
+        if remote_sha is None:
+            return "sha256_unreadable"
+        if remote_sha != local_sha256:
+            return "sha256_mismatch"
+        return None
+
     def _ensure_server_pushed(self) -> None:
-        """Push scrcpy-server binary to device if not already present."""
+        """Push scrcpy-server binary to device if not already present and sha256-verified."""
         server_path = _scrcpy._SERVER_DIR / _scrcpy._SERVER_FILENAME
         if not server_path.exists():
             raise FileNotFoundError(
@@ -86,24 +153,11 @@ class _StreamServerMixin:
                 f"and place at {server_path}"
             )
 
-        # Check if already pushed (by file size)
         local_size = server_path.stat().st_size
-        try:
-            result = _scrcpy.subprocess.run(
-                [_scrcpy.ADB_PATH, "-s", self.serial, "shell", f"wc -c < {_scrcpy._DEVICE_PATH}"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            remote_size = int(result.stdout.strip())
-            if remote_size == local_size:
-                return  # Already pushed
-        except (
-            _scrcpy.subprocess.TimeoutExpired,
-            ValueError,
-            _scrcpy.subprocess.CalledProcessError,
-        ):
-            pass  # Need to push
+        local_sha256 = _scrcpy._vendored_server_sha256(server_path)
+        reason = self._server_push_reason(local_size, local_sha256)
+        if reason is None:
+            return
 
         _scrcpy.subprocess.run(
             [_scrcpy.ADB_PATH, "-s", self.serial, "push", str(server_path), _scrcpy._DEVICE_PATH],
@@ -111,12 +165,17 @@ class _StreamServerMixin:
             check=True,
             timeout=30,
         )
-        _scrcpy.logger.info("scrcpy_server_pushed", serial=self.serial, size=local_size)
+        _scrcpy.logger.info(
+            "scrcpy_server_pushed",
+            serial=self.serial,
+            size=local_size,
+            reason=reason,
+        )
 
     def _start_server(self) -> None:
         """Start the scrcpy-server process on the device."""
-        scid = self._port  # Use port as scid for uniqueness
-        scid_hex = format(scid, "08d")  # Server uses zero-padded decimal, not hex
+        scid = _scrcpy.nerve_scid(self._port)
+        scid_hex = _scrcpy._format_scid(scid)
 
         # Set up ADB forward tunnel
         _scrcpy.subprocess.run(
@@ -126,7 +185,7 @@ class _StreamServerMixin:
                 self.serial,
                 "forward",
                 f"tcp:{self._port}",
-                f"localabstract:scrcpy_{scid_hex}",
+                _scrcpy.scid_socket_name(scid),
             ],
             capture_output=True,
             check=True,
@@ -145,7 +204,7 @@ class _StreamServerMixin:
                 "/",
                 "com.genymobile.scrcpy.Server",
                 _scrcpy.SCRCPY_VERSION,
-                f"scid={scid}",
+                f"scid={scid_hex}",
                 "tunnel_forward=true",
                 "audio=false",
                 "control=true",

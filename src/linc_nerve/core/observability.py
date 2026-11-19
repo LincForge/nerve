@@ -29,10 +29,9 @@ _REDACT_ALL_KEYS = frozenset({"extras", "uri"})
 
 def linc_home() -> Path:
     """Resolve the LINC home directory ($LINC_HOME or ~/.linc)."""
-    env = os.getenv("LINC_HOME")
-    if env:
-        return Path(env).expanduser()
-    return Path.home() / ".linc"
+    from linc_nerve.core.engagement import default_linc_home
+
+    return default_linc_home()
 
 
 def usage_log_mode() -> str:
@@ -51,8 +50,10 @@ def _should_log() -> bool:
 
 
 def _default_log_path() -> Path:
-    """Resolve default mcp-calls log path lazily; honors LINC_HOME for tests."""
-    return linc_home() / "mcp-calls.jsonl"
+    """Resolve default mcp-calls log path lazily (artifacts root or LINC_HOME)."""
+    from linc_nerve.core.engagement import mcp_call_log_path
+
+    return mcp_call_log_path()
 
 
 def _write_log_entry(log_path: Path, entry: dict, max_size_bytes: int) -> None:
@@ -90,7 +91,12 @@ def log_mcp_call(
 ) -> None:
     """Append one MCP tool call record to the JSONL log."""
     if log_path is None:
-        log_path = _default_log_path()
+        from linc_nerve.core.engagement import EngagementMisconfiguredError
+
+        try:
+            log_path = _default_log_path()
+        except EngagementMisconfiguredError:
+            return
     entry = {
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "server": server,

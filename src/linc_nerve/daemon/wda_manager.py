@@ -37,8 +37,8 @@ simulator back down (via the injectable ``sim_shutdown(udid)`` seam) if a
 failed start leaves it Booted when it was not Booted at the top of the
 attempt.
 
-One listing per tick, off the shared tool worker (linc-nerve#970638ee)
--------------------------------------------------------------------------
+One listing per tick, off the shared tool worker
+----------------------------------------------
 Two follow-up fixes after a nightly abort (2026-09-15) traced to this poll
 loop running on the daemon's single shared tool-worker thread:
 
@@ -77,6 +77,7 @@ import structlog
 
 from linc_nerve.core.device import DeviceType
 from linc_nerve.core.ios import _is_physical_udid
+from linc_nerve.core.ios_discovery import xcode_first_launch_ready
 
 if TYPE_CHECKING:
     from linc_nerve.core.wda import WDAManager, WDASession
@@ -100,6 +101,8 @@ def _default_sim_states() -> dict[str, str]:
     probe that returns nothing at all) reads as "not Booted" either way —
     the same fail-safe posture the old per-UDID probe had.
     """
+    if not xcode_first_launch_ready():
+        return {}
     try:
         result = subprocess.run(  # nosec B603 B607 - fixed argv, no shell
             ["xcrun", "simctl", "list", "devices", "--json"],

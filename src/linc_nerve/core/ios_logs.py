@@ -13,6 +13,8 @@ import re
 import subprocess
 import tempfile
 
+from .ios_discovery import XcodeNotReadyError, xcode_first_launch_ready
+
 
 class _LogsMixin:
     """Bundle-id resolution + log show/stream methods for IOSController."""
@@ -56,7 +58,9 @@ class _LogsMixin:
 
     def _resolve_bundle_id_physical(self, serial: str, filter_str: str) -> str:
         """Resolve bundle ID to executable name on a physical device."""
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+        from linc_nerve.core.engagement import scratch_dir
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, dir=scratch_dir()) as f:
             json_path = f.name
         try:
             self._run_devicectl(
@@ -104,7 +108,7 @@ class _LogsMixin:
             timeout=timeout,
         )
 
-    # linc-nerve#128/129 round 1 finding 3: the old `^[\w.\-]+$` allowed a
+    # Log-filter validation: the old `^[\w.\-]+$` allowed a
     # leading `-` (`\w` includes letters/digits/underscore, and `-` is in
     # the class too) — a filter like `-c` matched fine and would have
     # reached `create_subprocess_exec`'s argv as a flag-shaped value.
@@ -207,6 +211,7 @@ class _LogsMixin:
                 "syslog",
             ]
         else:
+            XcodeNotReadyError.check(xcode_first_launch_ready())
             cmd_args = [
                 "xcrun",
                 "simctl",

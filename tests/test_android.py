@@ -162,9 +162,9 @@ class TestAndroidDiscovery:
 
     def test_discover_spaced_mdns_serial_survives_and_is_a_watch(self) -> None:
         """The reactor case: an mDNS wifi-adb serial with a collision suffix
-        (`adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp`) must survive discovery
+        (`adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp`) must survive discovery
         intact — not get truncated to its state token and dropped."""
-        mdns_serial = "adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp"
+        mdns_serial = "adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp"
         phone_device = MagicMock()
         phone_device.serial = "R3CFAKE00001"
         phone_device.shell.side_effect = lambda cmd, **kw: {
@@ -594,7 +594,13 @@ class TestAndroidScrcpyInput:
         """First call probes server_available; True → manager created."""
         ctrl = AndroidController()
         assert ctrl._scrcpy_available is None
-        with patch("linc_nerve.core.android.server_available", return_value=True):
+        with (
+            patch("linc_nerve.core.android.server_available", return_value=True),
+            patch(
+                "linc_nerve.core.scrcpy.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+            ),
+        ):
             scrcpy = ctrl._get_scrcpy()
         assert scrcpy is not None
         assert ctrl._scrcpy_available is True

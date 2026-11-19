@@ -1,4 +1,4 @@
-"""Which adb server nerve talks to — the single source of truth (7aaba3c3).
+"""Which adb server nerve talks to — the single source of truth.
 
 nerve honours adb's own variables, read at call time:
 

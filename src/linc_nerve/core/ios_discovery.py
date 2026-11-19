@@ -10,14 +10,128 @@ directly because the suite patches the global ``subprocess.run``, not
 from __future__ import annotations
 
 import contextlib
+import enum
 import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
+import time
+from collections.abc import Callable
+from typing import Any
 
 from . import ios as _ios
-from .device import DeviceType, NerveDevice, Platform
+from .device import DeviceError, DeviceType, NerveDevice, Platform
+
+
+class _FirstLaunchStatus(enum.Enum):
+    READY = "ready"
+    NOT_READY = "not_ready"
+    TRANSIENT = "transient"
+    NOT_DARWIN = "not_darwin"
+
+
+_XCODEBUILD_FIRST_LAUNCH_CMD = ["/usr/bin/xcodebuild", "-checkFirstLaunchStatus"]
+_FIRST_LAUNCH_WARNING = "Xcode first launch pending: run `sudo xcodebuild -runFirstLaunch`"
+_FIRST_LAUNCH_READY_MESSAGE = "Xcode first launch ready: iOS discovery resumed"
+_NON_DARWIN_MESSAGE = "iOS discovery disabled: not running on macOS"
+_FIRST_LAUNCH_CACHE_TTL = 300.0
+_FIRST_LAUNCH_TRANSIENT_TTL = 30.0
+_FIRST_LAUNCH_TIMEOUT = 5
+
+
+class XcodeNotReadyError(DeviceError):
+    """Raised when a user-initiated iOS tool path runs before Xcode first launch is ready."""
+
+    def __init__(self, message: str = _FIRST_LAUNCH_WARNING) -> None:
+        super().__init__(message)
+
+    @classmethod
+    def check(cls, ready: bool) -> None:
+        if not ready:
+            raise cls()
+
+
+_first_launch_cache: tuple[float, bool] | None = None
+_first_launch_cache_ttl: float = _FIRST_LAUNCH_CACHE_TTL
+_first_launch_last_state: bool | None = None
+
+
+def _reset_xcode_first_launch_state() -> None:
+    """Clear the cached Xcode first-launch verdict and warning state."""
+    global _first_launch_cache, _first_launch_cache_ttl, _first_launch_last_state
+    _first_launch_cache = None
+    _first_launch_cache_ttl = _FIRST_LAUNCH_CACHE_TTL
+    _first_launch_last_state = None
+
+
+def _probe_xcode_first_launch_status(
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> _FirstLaunchStatus:
+    """Classify ``/usr/bin/xcodebuild -checkFirstLaunchStatus`` into a status verdict."""
+    if sys.platform != "darwin":
+        return _FirstLaunchStatus.NOT_DARWIN
+    try:
+        result = runner(
+            _XCODEBUILD_FIRST_LAUNCH_CMD,
+            capture_output=True,
+            text=True,
+            timeout=_FIRST_LAUNCH_TIMEOUT,
+            check=False,
+        )
+    except FileNotFoundError:
+        return _FirstLaunchStatus.NOT_READY
+    except (subprocess.SubprocessError, OSError):
+        return _FirstLaunchStatus.TRANSIENT
+    return _FirstLaunchStatus.READY if result.returncode == 0 else _FirstLaunchStatus.NOT_READY
+
+
+def _probe_xcode_first_launch(
+    runner: Callable[..., subprocess.CompletedProcess[Any]],
+) -> bool:
+    """Run ``/usr/bin/xcodebuild -checkFirstLaunchStatus``; True iff exit 0 on darwin."""
+    return _probe_xcode_first_launch_status(runner) is _FirstLaunchStatus.READY
+
+
+def xcode_first_launch_ready(
+    runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
+) -> bool:
+    """Precondition gate before any daemon/discovery ``xcrun`` invocation.
+
+    Verifies ``/usr/bin/xcodebuild -checkFirstLaunchStatus`` exits 0 on darwin,
+    caching the verdict for ``_FIRST_LAUNCH_CACHE_TTL`` seconds (~5 min) or
+    ``_FIRST_LAUNCH_TRANSIENT_TTL`` seconds (30s) on transient probe errors.
+    Logs one message per state change and returns False when not ready so
+    callers skip iOS without spawning ``xcrun``.
+    """
+    global _first_launch_cache, _first_launch_cache_ttl, _first_launch_last_state
+    now = time.monotonic()
+    if _first_launch_cache is not None:
+        ts, cached_ready = _first_launch_cache
+        if now - ts < _first_launch_cache_ttl:
+            return cached_ready
+
+    run = subprocess.run if runner is None else runner
+    status = _probe_xcode_first_launch_status(run)
+    ready = status is _FirstLaunchStatus.READY
+    _first_launch_cache_ttl = (
+        _FIRST_LAUNCH_TRANSIENT_TTL
+        if status is _FirstLaunchStatus.TRANSIENT
+        else _FIRST_LAUNCH_CACHE_TTL
+    )
+    _first_launch_cache = (now, ready)
+    if ready:
+        if _first_launch_last_state is False:
+            _ios.logger.info(_FIRST_LAUNCH_READY_MESSAGE)
+    elif _first_launch_last_state is not False:
+        if status is _FirstLaunchStatus.NOT_DARWIN:
+            _ios.logger.info(_NON_DARWIN_MESSAGE)
+        else:
+            _ios.logger.warning(_FIRST_LAUNCH_WARNING)
+    _first_launch_last_state = ready
+    return ready
+
 
 # devicectl tunnelState values that mean "reachable" — devicectl establishes the
 # tunnel on demand at install/launch, so "disconnected" is online. Allowlist, not
@@ -51,11 +165,18 @@ class _DiscoveryMixin:
     def _discover_simulators(self) -> list[NerveDevice]:
         """Discover simulators via simctl."""
         devices: list[NerveDevice] = []
+        if not xcode_first_launch_ready():
+            return devices
         try:
             result = self._run("list", "devices", "available", "-j")
             data = json.loads(result.stdout)
-        except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError) as exc:
-            _ios.logger.debug("ios_discovery_failed", error=str(exc))
+        except (
+            subprocess.CalledProcessError,
+            json.JSONDecodeError,
+            FileNotFoundError,
+            XcodeNotReadyError,
+        ) as err:
+            _ios.logger.debug("ios_discovery_failed", error=str(err))
             return devices
 
         for runtime, device_list in data.get("devices", {}).items():
@@ -122,7 +243,13 @@ class _DiscoveryMixin:
         reality "simulated") are skipped. Raises on failure so _discover_physical can fall back
         to the legacy xctrace parser.
         """
-        fd, tmp_json = tempfile.mkstemp(suffix=".json", prefix="nerve-devicectl-")
+        if not xcode_first_launch_ready():
+            return []
+        from linc_nerve.core.engagement import scratch_dir
+
+        fd, tmp_json = tempfile.mkstemp(
+            suffix=".json", prefix="nerve-devicectl-", dir=scratch_dir()
+        )
         os.close(fd)
         try:
             subprocess.run(
@@ -196,8 +323,9 @@ class _DiscoveryMixin:
             subprocess.CalledProcessError,
             FileNotFoundError,
             subprocess.TimeoutExpired,
-        ) as exc:
-            _ios.logger.debug("devicectl_discovery_failed", error=str(exc))
+            XcodeNotReadyError,
+        ) as err:
+            _ios.logger.debug("devicectl_discovery_failed", error=str(err))
         return self._discover_physical_xctrace()
 
     def _discover_physical_xctrace(self) -> list[NerveDevice]:
@@ -209,6 +337,8 @@ class _DiscoveryMixin:
         Skips simulators (handled by _discover_simulators) and the Mac itself.
         """
         devices: list[NerveDevice] = []
+        if not xcode_first_launch_ready():
+            return devices
         try:
             result = subprocess.run(
                 ["xcrun", "xctrace", "list", "devices"],
@@ -221,8 +351,9 @@ class _DiscoveryMixin:
             subprocess.CalledProcessError,
             FileNotFoundError,
             subprocess.TimeoutExpired,
-        ) as exc:
-            _ios.logger.debug("xctrace_discovery_failed", error=str(exc))
+            XcodeNotReadyError,
+        ) as err:
+            _ios.logger.debug("xctrace_discovery_failed", error=str(err))
             return devices
 
         # Parse output — physical devices appear between "== Devices ==" and next "==" section

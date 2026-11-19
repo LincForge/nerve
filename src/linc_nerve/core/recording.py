@@ -41,7 +41,7 @@ def _has_video_frame(path: Path) -> bool:
         return next(container.decode(container.streams.video[0]), None) is not None
 
 
-def assert_recording_playable(path: Path, stderr: str) -> None:
+def assert_recording_playable(path: Path, stderr: str, is_wear: bool = False) -> None:
     """Raise if the MP4 at *path* has no decodable video frame.
 
     Wear OS ``adb shell screenrecord`` exits 0 but writes an ~8 KB MP4 with no
@@ -55,10 +55,15 @@ def assert_recording_playable(path: Path, stderr: str) -> None:
         playable = False
     if not playable:
         size = path.stat().st_size
+        advice = (
+            "On Wear OS, adb screenrecord exits 0 but writes an empty MP4; "
+            "record the watch with scrcpy instead."
+            if is_wear
+            else "The phone/tablet recording produced no decodable frames; try re-recording."
+        )
         msg = (
             f"Recording at {path} has no decodable video frames ({size} bytes). "
-            "On Wear OS, adb screenrecord exits 0 but writes an empty MP4; "
-            f"record the watch with scrcpy instead.{_stderr_detail(stderr)}"
+            f"{advice}{_stderr_detail(stderr)}"
         )
         raise RuntimeError(msg)
 

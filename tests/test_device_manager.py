@@ -322,7 +322,7 @@ class TestReapStale:
         db = tmp_path / "test.db"
         mgr1 = DeviceManager(db_path=db)
         try:
-            mgr1.reserve("DEVICE_A", timeout_seconds=0)
+            mgr1.reserve("DEVICE_A", timeout_seconds=1)
 
             # Simulate dead PID by updating the reservation to have a stale heartbeat
             # and a PID that doesn't exist

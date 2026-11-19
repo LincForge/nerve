@@ -17,11 +17,17 @@ import re
 
 from linc_cli_kit import ToolError
 
+from linc_nerve.core import timeouts
+
 _DEVICE_NOT_FOUND_RE = re.compile(r"Device '([^']+)' not found")
 _MCP_TOOL_NAME_RE = re.compile(r"\bnerve_[a-z0-9_]+\b")
 
 _DISCOVER_HINT = "Run `nerve discover` to list devices."
 _RESERVED_HINT = "Wait for the lease to expire or check the holder with `nerve pool`."
+_LONG_OP_TIMEOUT_HINT = (
+    "the operation may still be running on the device; check its result "
+    "(for install: `nerve apps <device>`) before retrying, or pass --timeout"
+)
 
 
 def cli_hint(text: str) -> str:
@@ -94,12 +100,26 @@ def honest_error(result: object) -> ToolError | None:
     return None
 
 
-def honest_toolerror(exc: ToolError) -> ToolError:
-    """Re-map a kit ToolError/UsageError hiding a device-not-found message to DEVICE_NOT_FOUND.
+def honest_toolerror(exc: ToolError, tool_name: str = "") -> ToolError:
+    """Re-map a kit ToolError/UsageError for device-not-found and long-op timeout shapes.
 
     Covers the daemon 400 -> ``UsageError`` path (e.g. ``recording_tools``' ``get_device_sync``
     ``ValueError`` becomes a daemon HTTP 400, which ``HttpDaemonTransport`` turns into a plain
-    ``UsageError``). Any other exception is returned unchanged.
+    ``UsageError``), and replaces the hint on ``upstream_timeout`` for tools in the timeouts
+    table so callers check whether the operation finished on device before retrying. Any other
+    exception is returned unchanged.
     """
     not_found = _device_not_found_error(str(exc))
-    return not_found if not_found is not None else exc
+    if not_found is not None:
+        return not_found
+    if exc.category == "upstream_timeout" and tool_name in timeouts.CLI_DEFAULT_S:
+        return ToolError(
+            exc.message,
+            code=exc.code,
+            hint=_LONG_OP_TIMEOUT_HINT,
+            category=exc.category,
+            retryable=exc.retryable,
+            details=exc.details,
+            exit_code=exc.exit_code,
+        )
+    return exc

@@ -13,7 +13,6 @@ from pathlib import Path
 import structlog
 
 from .device import DeviceError
-from .observability import linc_home
 from .recording import (
     assert_recording_nonempty,
     exited_stderr,
@@ -56,12 +55,49 @@ def _is_physical_udid(serial: str) -> bool:
     return not (len(serial) == 36 and serial.count("-") == 4)
 
 
+_MAX_LOCKSTATE_CHARS = 65_536
+
+
+def _reject_json_constant(value: str) -> object:
+    raise ValueError(value)
+
+
+def parse_lock_state(text: str) -> str:
+    """Parse ``devicectl device info lockState --json-output -`` stdout.
+
+    Uses ``result.passcodeRequired`` and ``result.unlockedSinceBoot`` from the
+    captured devicectl lockState fixture. Returns ``"locked"``, ``"unlocked"``,
+    or ``"unknown"`` and never raises.
+    """
+    if not isinstance(text, str) or not text or len(text) > _MAX_LOCKSTATE_CHARS:
+        return "unknown"
+    brace = text.find("{")
+    if brace < 0:
+        return "unknown"
+    try:
+        data = json.loads(text[brace:], parse_constant=_reject_json_constant)
+    except ValueError:
+        return "unknown"
+    result = data.get("result")
+    if not isinstance(result, dict):
+        return "unknown"
+    passcode_required = result.get("passcodeRequired")
+    unlocked_since_boot = result.get("unlockedSinceBoot")
+    if not isinstance(passcode_required, bool) or not isinstance(unlocked_since_boot, bool):
+        return "unknown"
+    return "locked" if (passcode_required or not unlocked_since_boot) else "unlocked"
+
+
 # Concern mixins split out in #53 to keep this file under the hot-file LOC
 # ceiling. Imported after ``logger`` / ``_is_physical_udid`` are defined; the
 # mixins reach this module's globals (``logger``) via the parent module at
 # call-time, so the circular import is safe.
 from .ios_apps_logs import _AppsLogsMixin  # noqa: E402
-from .ios_discovery import _DiscoveryMixin  # noqa: E402
+from .ios_discovery import (  # noqa: E402
+    XcodeNotReadyError,
+    _DiscoveryMixin,
+    xcode_first_launch_ready,
+)
 from .ios_interaction import _InteractionMixin  # noqa: E402
 from .ios_logs import _LogsMixin  # noqa: E402
 
@@ -94,6 +130,7 @@ class IOSController(_DiscoveryMixin, _InteractionMixin, _AppsLogsMixin, _LogsMix
         check: bool = True,
     ) -> subprocess.CompletedProcess:
         """Execute a simctl command."""
+        XcodeNotReadyError.check(xcode_first_launch_ready())
         cmd = ["xcrun", "simctl", *args]
         return subprocess.run(
             cmd,
@@ -109,6 +146,7 @@ class IOSController(_DiscoveryMixin, _InteractionMixin, _AppsLogsMixin, _LogsMix
         timeout: int = 15,
     ) -> subprocess.CompletedProcess:
         """Execute a simctl command returning binary output."""
+        XcodeNotReadyError.check(xcode_first_launch_ready())
         cmd = ["xcrun", "simctl", *args]
         return subprocess.run(
             cmd,
@@ -124,6 +162,7 @@ class IOSController(_DiscoveryMixin, _InteractionMixin, _AppsLogsMixin, _LogsMix
         check: bool = True,
     ) -> subprocess.CompletedProcess:
         """Execute a devicectl command for physical devices."""
+        XcodeNotReadyError.check(xcode_first_launch_ready())
         cmd = ["xcrun", "devicectl", *args]
         return subprocess.run(
             cmd,
@@ -136,6 +175,26 @@ class IOSController(_DiscoveryMixin, _InteractionMixin, _AppsLogsMixin, _LogsMix
     def _is_physical(self, serial: str) -> bool:
         """Check if serial belongs to a physical device."""
         return _classify_physical(serial, self._physical_serials, self._simulator_serials)
+
+    def lock_state(self, serial: str) -> str:
+        """Read physical device lock state via devicectl ('locked' | 'unlocked' | 'unknown')."""
+        try:
+            proc = self._run_devicectl(
+                "device",
+                "info",
+                "lockState",
+                "--device",
+                serial,
+                "--json-output",
+                "-",
+                timeout=15,
+                check=False,
+            )
+        except (XcodeNotReadyError, subprocess.SubprocessError, OSError):
+            return "unknown"
+        if proc.returncode != 0:
+            return "unknown"
+        return parse_lock_state(proc.stdout)
 
     def _device_lock(self, serial: str) -> threading.Lock:
         """Get or create a per-device lock to serialize commands."""
@@ -191,11 +250,15 @@ class IOSController(_DiscoveryMixin, _InteractionMixin, _AppsLogsMixin, _LogsMix
 
     def start_recording(self, serial: str) -> None:
         """Start video recording."""
-        self._require_recordable(serial)
+        from linc_nerve.core import engagement
 
-        out_dir = linc_home() / "nerve" / "recordings"
+        out_dir = engagement.recordings_dir()
+        self._require_recordable(serial)
+        XcodeNotReadyError.check(xcode_first_launch_ready())
+
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"{serial}_{int(time.time())}.mp4"
+        safe = engagement.safe_serial(serial)
+        path = out_dir / f"{safe}_{int(time.time())}.mp4"
 
         cmd = [
             "xcrun",

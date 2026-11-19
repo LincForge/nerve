@@ -24,11 +24,13 @@ from typing import Any, ClassVar
 
 import pytest
 
+import linc_nerve
 from linc_nerve.core import adb_server
 from linc_nerve.core.adb_server import AdbServerAddress, adb_server_address
 from linc_nerve.core.android import AndroidController
 
-SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "linc_nerve"
+_REPO_SRC = pathlib.Path(__file__).resolve().parents[1] / "src" / "linc_nerve"
+SRC = _REPO_SRC if _REPO_SRC.is_dir() else pathlib.Path(linc_nerve.__file__).resolve().parent
 
 
 @pytest.fixture(autouse=True)

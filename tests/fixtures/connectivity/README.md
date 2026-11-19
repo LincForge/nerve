@@ -2,7 +2,7 @@
 
 Trimmed `adb shell dumpsys connectivity` output for `parse_connectivity`
 (`src/linc_nerve/core/device_state.py`, linc-nerve-up9). All are real captures
-taken on the Mac mini bench on 2026-10-04, under a nerve reservation.
+taken on a test bench host on 2026-10-04, under a nerve reservation.
 
 - `tablet_offline.txt`: Galaxy Tab Active3 (SM-T570, Android 12)
   with Wi-Fi switched off, so there is no default network

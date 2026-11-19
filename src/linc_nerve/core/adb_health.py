@@ -4,9 +4,9 @@ Why this module exists
 ----------------------
 The daemon's ``/health`` used to be a pure liveness probe: it returned
 ``ok: true`` as long as the process could serve HTTP, touching nothing
-downstream. On 2026-08-22→09-01 and again on 2026-09-03 the mini's adb server
-entered an ``fdevent_context_poll::Loop()`` busy-spin at ~100% CPU. Every adb
-client blocked forever, ``nerve_discover`` reported ``android: 0``, the nightly
+downstream. Previously, a host's adb server entered an
+``fdevent_context_poll::Loop()`` busy-spin at ~100% CPU. Every adb
+client blocked forever, ``nerve_discover`` reported ``android: 0``, the
 device bench lost 6 Android slots across 5 apps — and ``/health`` stayed green
 for 28 hours. **A health check that cannot fail is not a health check.**
 
@@ -29,7 +29,7 @@ Design
   2026-09-03 manual repair needed a daemon bounce for exactly this reason; the
   ``on_recover`` callback removes that step.
 - **/health reads a cached reading, never probes inline.** ``/health`` stays a
-  sub-50ms no-I/O endpoint (issue 9abb5f9d) and stays HTTP 200 in every state —
+  sub-50ms no-I/O endpoint and stays HTTP 200 in every state —
   ``_probe_existing_daemon`` reads only the status line, so a non-200 would make
   a second daemon fight for the port. The truth is in the ``ok`` field.
 - **Only a process that actually watches can go red.** ``nerve bellows`` and
@@ -39,8 +39,6 @@ Design
   serial sets and resets the client when they disagree for more than a grace
   window. The health signal is "nerve's device set matches adb's", not merely
   "adb answered".
-
-See ``LINC.md § Operational Notes`` and ``LincForge/linc-nerve#131``.
 """
 
 from __future__ import annotations
@@ -48,6 +46,7 @@ from __future__ import annotations
 import os
 import re
 import signal
+import socket
 import subprocess  # nosec B404 — fixed argv, no shell, hard timeouts
 import time
 from collections.abc import Callable, Iterable
@@ -139,18 +138,25 @@ _LAST_DRIFT_RESET_AT: float | None = None
 #: reconnect, and what a post-recovery reprobe is diffed against to catch a
 #: device-set shrink (killing the server drops every wifi-adb transport).
 _LAST_GOOD_SERIALS: tuple[str, ...] = ()
+#: Wifi-adb serials whose post-recovery ``adb connect`` failed with a LAN
+#: route/protocol error while a direct TCP probe from nerve succeeded (macOS
+#: Local Network denial on the restarted adb server).
+_LOCAL_NETWORK_DENIED: set[str] = set()
 
 
 def record_transport_status(status: AdbTransportStatus) -> None:
     """Publish the latest reading for ``/health`` to render.
 
     Also refreshes ``_LAST_GOOD_SERIALS`` whenever the transport answered, so
-    a later wedge recovery knows what to reconnect and what "shrank" means.
+    a later wedge recovery knows what to reconnect and what "shrank" means, and
+    drops any online serial from ``_LOCAL_NETWORK_DENIED``.
     """
     global _LAST_STATUS, _LAST_GOOD_SERIALS
     _LAST_STATUS = status
     if status.responsive:
         _LAST_GOOD_SERIALS = status.adb_serials
+        for serial in status.adb_serials:
+            _LOCAL_NETWORK_DENIED.discard(serial)
 
 
 def get_transport_status() -> AdbTransportStatus | None:
@@ -216,6 +222,7 @@ def reset_transport_status() -> None:
     _DRIFT_SINCE = None
     _LAST_DRIFT_RESET_AT = None
     _LAST_GOOD_SERIALS = ()
+    _LOCAL_NETWORK_DENIED.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +234,7 @@ def split_adb_device_line(line: str) -> tuple[str, str] | None:
     """Split one non-header ``adb devices`` line into ``(serial, state)``.
 
     adb separates the two with a TAB, and an mDNS wifi-adb serial can itself
-    contain a space (``adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp``), so a
+    contain a space (``adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp``), so a
     plain whitespace split mangles it. Splitting on the LAST tab keeps the
     whole serial intact regardless of internal spaces. Hand-written fixtures
     that use plain spaces (no tab) fall back to splitting on the last run of
@@ -259,6 +266,76 @@ def parse_adb_devices(output: str) -> tuple[str, ...]:
         if split is not None and split[1] == "device":
             serials.append(split[0])
     return tuple(serials)
+
+
+_ADB_LONG_LINE_RE = re.compile(
+    r"\A(?P<serial>.+?)\s+(?P<state>device|offline|unauthorized|authorizing|"
+    r"connecting|bootloader|recovery|sideload|rescue)(?:\s+(?P<rest>.*))?\Z"
+)
+
+
+def _split_adb_long_line(line: str) -> tuple[str, str, str] | None:
+    """Split one non-header ``host:devices-l`` line into ``(serial, state, rest)``.
+
+    Tab-delimited lines split on the first tab only so internal spaces in an mDNS
+    serial stay intact and extra tabs inside qualifiers never shift the state.
+    Space-padded ``adb devices -l`` lines fall back to ``_ADB_LONG_LINE_RE``.
+    """
+    if "\t" in line:
+        serial_part, _, rest_part = line.partition("\t")
+        serial = serial_part.strip()
+        tokens = rest_part.split(None, 1)
+        if not serial or not tokens:
+            return None
+        return serial, tokens[0], (tokens[1] if len(tokens) > 1 else "")
+    match = _ADB_LONG_LINE_RE.match(line)
+    if match is None:
+        return None
+    return (
+        match.group("serial").strip(),
+        match.group("state"),
+        match.group("rest") or "",
+    )
+
+
+def _extract_transport_id(rest: str) -> str:
+    for tok in rest.split():
+        if tok.startswith("transport_id:"):
+            candidate = tok.removeprefix("transport_id:")
+            if candidate and candidate.isprintable():
+                return candidate
+            break
+    return ""
+
+
+def parse_adb_transport_ids(output: str) -> dict[str, str]:
+    """Parse ``{serial: transport_id}`` for ready devices from ``host:devices-l``.
+
+    Only entries in the ``device`` state with a non-empty ``transport_id:<id>``
+    qualifier are returned. Duplicate ready serials with differing transport IDs
+    are dropped so an ambiguous listing never satisfies a cache lookup.
+    """
+    result: dict[str, str] = {}
+    seen_ready: set[str] = set()
+    ambiguous: set[str] = set()
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("*", "List of devices")):
+            continue
+        parsed = _split_adb_long_line(line)
+        if parsed is None or parsed[1] != "device":
+            continue
+        serial, _, rest = parsed
+        tid = _extract_transport_id(rest)
+        if serial in seen_ready:
+            if result.get(serial, "") != tid:
+                ambiguous.add(serial)
+                result.pop(serial, None)
+            continue
+        seen_ready.add(serial)
+        if tid and serial not in ambiguous:
+            result[serial] = tid
+    return result
 
 
 def count_ready_devices(output: str) -> int:
@@ -296,11 +373,40 @@ def is_network_serial(serial: str) -> bool:
     """True for a wifi-adb ``<ipv4>:<port>`` serial.
 
     A USB serial (``R3CFAKE00001``) is False. An mDNS ``_adb-tls-connect``
-    service name (``adb-RFAT629KQ9A-abc._adb-tls-connect._tcp``) is also
+    service name (``adb-FAKESERIAL01-abc._adb-tls-connect._tcp``) is also
     False — ``adb connect`` takes an explicit host:port, not a service name,
     so that lane is not reconnectable this way and must be skipped.
     """
     return bool(_NETWORK_SERIAL_RE.fullmatch(serial))  # H1: no trailing-\n bypass
+
+
+_LAN_FAILURE_PHRASES = ("No route to host", "protocol fault", "Host is down")
+_OK_PHRASES = ("connected to", "already connected")
+
+
+def _has_lan_failure_text(output: str) -> bool:
+    return any(phrase in output for phrase in _LAN_FAILURE_PHRASES)
+
+
+def classify_adb_connect(output: str, tcp_reachable: bool | None) -> str:
+    """Classify ``adb connect`` combined stdout+stderr and TCP probe result.
+
+    Returns one of ``"ok"``, ``"local_network_denied"``, ``"unreachable"``,
+    ``"refused"``, or ``"unknown"``. Pure and never raises.
+    """
+    if not isinstance(output, str):
+        return "unknown"
+    if "Connection refused" in output:
+        return "refused"
+    if _has_lan_failure_text(output):
+        if tcp_reachable is True:
+            return "local_network_denied"
+        if tcp_reachable is False:
+            return "unreachable"
+        return "unknown"
+    if any(phrase in output for phrase in _OK_PHRASES):
+        return "ok"
+    return "unknown"
 
 
 def transport_health(
@@ -327,11 +433,13 @@ def transport_health(
     rendered block (empty list when nothing was lost) so a caller can assert
     on the value without first checking the state.
     """
+    denied = sorted(_LOCAL_NETWORK_DENIED)
     if monitor_uptime_seconds is None:
         return True, {
             "state": "unmonitored",
             "detail": "no transport watchdog in this process",
             "lost_after_recovery": [],
+            "local_network_denied": denied,
         }
 
     if status is None:
@@ -340,6 +448,7 @@ def transport_health(
                 "state": "pending",
                 "detail": "awaiting first transport probe",
                 "lost_after_recovery": [],
+                "local_network_denied": denied,
             }
         return False, {
             "state": "stale",
@@ -348,6 +457,7 @@ def transport_health(
                 "the watchdog is blocked in the same adb call every client is blocked in"
             ),
             "lost_after_recovery": [],
+            "local_network_denied": denied,
         }
 
     age = now - status.checked_at
@@ -362,6 +472,7 @@ def transport_health(
         "probe_seconds": round(status.probe_seconds, 2),
         "recovered": status.recovered,
         "lost_after_recovery": list(status.lost_after_recovery),
+        "local_network_denied": denied,
     }
     if status.drift:
         block["missing_from_nerve"] = list(status.drift)
@@ -591,19 +702,49 @@ def _start_server() -> bool:
     return True
 
 
-def _reconnect(serial: str) -> None:
+def _probe_tcp_reachable(serial: str) -> bool | None:
+    """Direct TCP probe from nerve's own process to *serial*. Never raises."""
+    if not is_network_serial(serial):
+        return None
+    host, port_str = serial.split(":")
+    try:
+        with socket.create_connection((host, int(port_str)), timeout=2.0):
+            return True
+    except OSError:
+        return False
+    except Exception as exc:
+        log.warning("adb_tcp_probe_error", serial=serial, error=str(exc))
+        return None
+
+
+def _reconnect(serial: str) -> str | None:
     """``adb connect`` one wifi-adb *serial*; failures are logged, never raised."""
     if not is_network_serial(serial):
-        return
+        return None
     try:
         conn = _run([ADB_PATH, "connect", serial], timeout=10.0)
     except Exception as exc:
         log.warning("adb_reconnect_failed", serial=serial, error=str(exc))
-        return
-    if conn.returncode == 0:
-        log.info("adb_reconnect_ok", serial=serial)
-    else:
-        log.warning("adb_reconnect_failed", serial=serial, returncode=conn.returncode)
+        return "unknown"
+    output = f"{conn.stdout or ''}{conn.stderr or ''}"
+    tcp_reachable = _probe_tcp_reachable(serial) if _has_lan_failure_text(output) else None
+    try:
+        category = classify_adb_connect(output, tcp_reachable)
+    except Exception as exc:
+        log.warning("adb_reconnect_classify_error", serial=serial, error=str(exc))
+        category = "unknown"
+    if category == "local_network_denied":
+        _LOCAL_NETWORK_DENIED.add(serial)
+    elif category == "ok":
+        _LOCAL_NETWORK_DENIED.discard(serial)
+    log.info(
+        "adb_reconnect_classified",
+        serial=serial,
+        category=category,
+        tcp_reachable=tcp_reachable,
+        returncode=conn.returncode,
+    )
+    return category
 
 
 # ---------------------------------------------------------------------------

@@ -196,13 +196,16 @@ class _SensorRecordMixin:
             self._start_emulator_recording(serial)
             return
 
+        from linc_nerve.core import engagement
+
+        safe = engagement.safe_serial(serial)
         cmd = [
             _android.ADB_PATH,
             "-s",
             serial,
             "shell",
             "screenrecord",
-            f"/sdcard/nerve_record_{serial}.mp4",
+            f"/sdcard/nerve_record_{safe}.mp4",
         ]
         process = _android.subprocess.Popen(
             cmd, stdout=_android.subprocess.PIPE, stderr=_android.subprocess.PIPE, text=True
@@ -223,10 +226,13 @@ class _SensorRecordMixin:
         emulator console to begin); the actual capture continues in the
         background until ``emu screenrecord stop`` (see ``stop_recording``).
         """
-        out_dir = _android.Path("~/.linc/nerve/recordings").expanduser()
+        from linc_nerve.core import engagement
+
+        out_dir = _android.Path(engagement.recordings_dir())
         out_dir.mkdir(parents=True, exist_ok=True)
         timestamp = int(_android.time.time())
-        host_path = out_dir / f"android_{serial}_{timestamp}.webm"
+        safe = engagement.safe_serial(serial)
+        host_path = out_dir / f"android_{safe}_{timestamp}.webm"
 
         cmd = [
             _android.ADB_PATH,
@@ -333,12 +339,15 @@ class _SensorRecordMixin:
 
         _android.time.sleep(1.0)
 
-        out_dir = _android.Path("~/.linc/nerve/recordings").expanduser()
+        from linc_nerve.core import engagement
+
+        out_dir = _android.Path(engagement.recordings_dir())
         out_dir.mkdir(parents=True, exist_ok=True)
         timestamp = int(_android.time.time())
-        local_path = out_dir / f"android_{serial}_{timestamp}.mp4"
+        safe = engagement.safe_serial(serial)
+        local_path = out_dir / f"android_{safe}_{timestamp}.mp4"
 
-        remote_path = f"/sdcard/nerve_record_{serial}.mp4"
+        remote_path = f"/sdcard/nerve_record_{safe}.mp4"
         # Bounded so a stalled USB transfer can't pin the daemon's tool worker
         # (pull moves a potentially large mp4, rm is a quick shell op).
         _android.subprocess.run(
@@ -353,7 +362,9 @@ class _SensorRecordMixin:
         )
 
         self._assert_recording_nonempty(local_path, stderr)
-        assert_recording_playable(local_path, stderr)
+        assert_recording_playable(
+            local_path, stderr, is_wear=self._is_wear_os(serial) if self._client else False
+        )
         return local_path
 
     @staticmethod

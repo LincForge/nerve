@@ -22,7 +22,7 @@ from typing import Any
 import defusedxml.ElementTree as ET
 import structlog
 
-from . import adb_health
+from . import adb_health, android_identity
 from .adb_path import ADB_PATH
 from .device import DeviceError, DeviceType, ElementNode, NerveDevice, Platform
 from .device_state import (
@@ -83,7 +83,7 @@ _CIRCUIT_COOLDOWN_SECS = 30  # Hard cooldown duration
 _FAILURE_WINDOW_SECS = 10  # Window for distinct-device restart logic
 _DISTINCT_DEVICE_RESTART = 3  # Distinct devices needed to trigger restart
 
-# UI hierarchy cache (inbox 23f41765). `uiautomator dump` is ~3.2s p50 on a
+# UI hierarchy cache. `uiautomator dump` is ~3.2s p50 on a
 # populated Pixel; tight state→elements→state loops were paying it every
 # call. 0.5s TTL collapses bursts while invalidations on input mutate the
 # cache so post-tap callers see fresh data.
@@ -119,7 +119,7 @@ def _ready_adb_serials(client: Any) -> tuple[str, ...]:
     ``AdbClient.device_list()`` (via ``AdbClient.list()``) splits ``adb
     devices`` output on ANY whitespace upstream in adbutils — not patchable
     here — which mangles an mDNS wifi-adb serial that itself contains a space
-    (``adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp``). Speaking ``host:devices``
+    (``adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp``). Speaking ``host:devices``
     directly and parsing with ``adb_health.parse_adb_devices`` (which splits on
     the LAST tab) keeps that serial intact.
     """
@@ -128,6 +128,25 @@ def _ready_adb_serials(client: Any) -> tuple[str, ...]:
         conn.check_okay()
         output = conn.read_string_block()
     return adb_health.parse_adb_devices(output)
+
+
+def _ready_adb_transport_ids(client: Any) -> dict[str, str] | None:
+    """Read ``{serial: transport_id}`` for ready devices via ``host:devices-l``.
+
+    Returns ``None`` when the adb query fails or returns a non-string block so
+    callers know the transport IDs could not be verified.
+    """
+    try:
+        with client.make_connection() as conn:
+            conn.send_command("host:devices-l")
+            conn.check_okay()
+            output = conn.read_string_block()
+    except Exception as exc:
+        logger.debug("android_transport_ids_read_failed", error=str(exc))
+        return None
+    if not isinstance(output, str):
+        return None
+    return adb_health.parse_adb_transport_ids(output)
 
 
 # AndroidController is composed from sibling mixin modules (split in #53). The
@@ -178,6 +197,7 @@ class AndroidController(
         self._recording_processes: dict[str, Any] = {}
         # UI hierarchy cache: (serial, max_depth) → (monotonic_ts, elements)
         self._elements_cache: dict[tuple[str, int], tuple[float, list[dict]]] = {}
+        self._last_discover_failed_serials: set[str] = set()
 
     def _device_lock(self, serial: str) -> threading.Lock:
         """Get or create a per-device lock to serialize ADB commands."""
@@ -210,6 +230,70 @@ class AndroidController(
 
     # --- Discovery ---
 
+    def read_transport_ids(self) -> dict[str, str] | None:
+        """Read ``{serial: transport_id}`` for ready adb devices, or ``None`` if unreadable."""
+        try:
+            client = self._get_client()
+        except Exception as exc:
+            logger.debug("android_transport_ids_client_failed", error=str(exc))
+            return None
+        return _ready_adb_transport_ids(client)
+
+    def read_hardware_serial(self, serial: str) -> str:
+        """Read and normalize ``ro.serialno`` for *serial* without waiting on the device lock."""
+        try:
+            d = self._get_device(serial)
+        except Exception as exc:
+            logger.warning("android_serialno_read_failed", serial=serial, error=str(exc))
+            return ""
+        return android_identity.read_hardware_serial(d.shell, self._hard_timeout, serial)
+
+    @staticmethod
+    def _record_failed_network_probe(serial: str, failed: set[str]) -> None:
+        """Record an unmapped network transport whose ``ro.serialno`` probe failed."""
+        if android_identity.is_network_transport(serial) and not (
+            android_identity.mdns_hardware_serial(serial)
+        ):
+            failed.add(serial)
+
+    def _discover_cache_hardware_serial(
+        self,
+        d: Any,
+        serial: str,
+        failed: set[str],
+        *,
+        transport_id: str = "",
+    ) -> None:
+        """Resolve and cache ``ro.serialno`` during discovery for unmapped network transports."""
+        if not android_identity.is_network_transport(serial):
+            return
+        if android_identity.mdns_hardware_serial(serial):
+            return
+        hw = android_identity.read_hardware_serial(d.shell, self._hard_timeout, serial)
+        if hw:
+            if transport_id:
+                from . import engagement
+
+                engagement.cache_hardware_serial(serial, hw, transport_id=transport_id)
+        else:
+            failed.add(serial)
+
+    def _discover_transport_ids(self, client: Any, serials: tuple[str, ...]) -> dict[str, str]:
+        """Sync the hw-serial cache against *serials* and return ``{serial: transport_id}``."""
+        from . import engagement
+
+        engagement.prune_hardware_serial_cache(set(serials))
+        needs_tid = any(
+            android_identity.is_network_transport(s)
+            and not android_identity.mdns_hardware_serial(s)
+            for s in serials
+        )
+        if not needs_tid:
+            return {}
+        transport_ids = _ready_adb_transport_ids(client)
+        engagement.sync_hardware_serial_cache(transport_ids)
+        return transport_ids or {}
+
     def discover(self) -> list[NerveDevice]:
         """Discover all connected Android devices.
 
@@ -217,9 +301,12 @@ class AndroidController(
         from stale ADB connections (adbutils timeout= is unreliable).
         """
         devices: list[NerveDevice] = []
+        failed_hw: set[str] = set()
         try:
             client = self._get_client()
-            for serial in _ready_adb_serials(client):
+            serials = _ready_adb_serials(client)
+            transport_ids = self._discover_transport_ids(client, serials)
+            for serial in serials:
                 d = client.device(serial=serial)
                 try:
                     with self._device_lock_timeout(serial, timeout=20):
@@ -244,6 +331,12 @@ class AndroidController(
                             timeout=12,
                             label=f"discover-chars-{serial[:8]}",
                         ).strip()
+                        self._discover_cache_hardware_serial(
+                            d,
+                            serial,
+                            failed_hw,
+                            transport_id=transport_ids.get(serial, ""),
+                        )
 
                     if serial.startswith("emulator-"):
                         dt = DeviceType.EMULATOR
@@ -256,6 +349,7 @@ class AndroidController(
                     else:
                         dt = DeviceType.PHONE
                 except Exception:
+                    self._record_failed_network_probe(serial, failed_hw)
                     model = serial
                     os_ver = ""
                     dt = (
@@ -274,6 +368,7 @@ class AndroidController(
                 )
         except Exception as exc:
             logger.debug("android_discovery_failed", error=str(exc))
+        self._last_discover_failed_serials = failed_hw
         return devices
 
     def is_ready_serial(self, serial: str) -> bool:

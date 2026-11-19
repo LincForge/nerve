@@ -63,3 +63,12 @@ def test_workflows_reference_no_private_repos_or_secrets() -> None:
 def test_dependabot_version_updates_disabled() -> None:
     cfg = yaml.safe_load((GH / "dependabot.yml").read_text())
     assert all(u.get("open-pull-requests-limit") == 0 for u in cfg["updates"])
+
+
+def test_test_and_smoke_workflows_declare_read_only_permissions() -> None:
+    for name in ("test.yml", "smoke.yml"):
+        wf = _wf(name)
+        assert wf.get("permissions") == {"contents": "read"}, (
+            f"{name} must declare top-level permissions == {{'contents': 'read'}}, "
+            f"got {wf.get('permissions')!r}"
+        )

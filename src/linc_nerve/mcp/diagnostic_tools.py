@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import contextlib
-import json
-import os
 import re
 import shlex
 import subprocess
-import tempfile
 from datetime import UTC, datetime
 from typing import Any
 
@@ -23,6 +19,7 @@ from linc_nerve.core.inspect_helpers import (
     _parse_pids,
     build_crash_signature,
 )
+from linc_nerve.core.ios_discovery import XcodeNotReadyError, xcode_first_launch_ready
 from linc_nerve.mcp import _core
 from linc_nerve.mcp._core import device_tool, global_tool
 
@@ -117,10 +114,11 @@ def _build_tail_lines(log_lines: list[str]) -> list[str]:
 
 
 def _process_log_lines(device: str, platform: str, log_lines: list[str]) -> dict[str, Any]:
+    from linc_nerve.core.engagement import write_private_text
+
     if _should_spill_logcat(log_lines):
         path = _core._next_output_path(device, "logcat", ext="txt")
-        with open(path, "w") as f:
-            f.write("\n".join(log_lines))
+        write_private_text(path, "\n".join(log_lines))
         tail_lines = _build_tail_lines(log_lines)
         count = len(log_lines)
         tail_count = len(tail_lines)
@@ -381,6 +379,24 @@ def _nerve_session_stats_sync() -> dict[str, Any]:
     return {"sessions": sessions, "count": len(sessions)}
 
 
+def _validate_bounded_count_err(value: Any, name: str) -> dict[str, Any] | None:
+    """Return a validation_error dict when *value* is outside 0..10000, else None."""
+    from linc_nerve.core.usage_stats import validate_bounded_count
+
+    try:
+        validate_bounded_count(value, name)
+    except ValueError as exc:
+        return {"error": str(exc), "validation_error": True}
+    return None
+
+
+def _get_metrics_collector() -> Any:
+    """Lazily initialize singletons if needed and return the metrics collector."""
+    if _core._metrics is None:
+        _core._ensure_initialized()
+    return require(_core._metrics, "metrics collector")
+
+
 @global_tool
 def _nerve_metrics_sync(
     command: str = "", last_n: int = 20, device: str = "", package: str = ""
@@ -401,9 +417,10 @@ def _nerve_metrics_sync(
         package: Optional app package name (forward-compatibility for callers
             scoping metrics to an app session).
     """
-    if _core._metrics is None:
-        _core._ensure_initialized()
-    metrics = require(_core._metrics, "metrics collector")
+    err = _validate_bounded_count_err(last_n, "last_n")
+    if err is not None:
+        return err
+    metrics = _get_metrics_collector()
 
     # Empty device string = no filter (handled by the metrics layer), so pass it
     # straight through — no None-coercion branch needed here.
@@ -414,7 +431,7 @@ def _nerve_metrics_sync(
     return {
         "device": device,
         "stats": stats,
-        "slow_commands": slow[-last_n:],
+        "slow_commands": slow[max(0, len(slow) - last_n) :],
         "recent": recent,
         "total_recorded": metrics.count,
         "tool_stats": metrics.tool_stats(),
@@ -449,7 +466,17 @@ def _nerve_usage_stats_sync(
         include_rotated: Also read rotated mcp-calls.<epoch>.jsonl siblings.
         top_n: Cap the per_tool list to the N busiest tools (default 50).
     """
-    from linc_nerve.core.usage_stats import compute_usage_stats
+    from linc_nerve.core.usage_stats import (
+        compute_usage_stats,
+        validate_bounded_count,
+        validate_since_hours,
+    )
+
+    try:
+        validate_since_hours(since_hours)
+        validate_bounded_count(top_n, "top_n")
+    except ValueError as exc:
+        return {"error": str(exc), "validation_error": True}
 
     registered = [t.name for t in _core.server._tool_manager.list_tools()]
     return compute_usage_stats(
@@ -593,61 +620,25 @@ def _devicectl_json(serial: str, info: str) -> dict[str, Any]:
     The ``--json-output`` temp file is always removed, even when devicectl or
     the parse fails (security review, Info: leaked ``delete=False`` files).
     """
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
-        path = f.name
-    try:
-        subprocess.run(
-            [
-                "xcrun",
-                "devicectl",
-                "device",
-                "info",
-                info,
-                "--device",
-                serial,
-                "--json-output",
-                path,
-            ],
-            capture_output=True,
-            timeout=15,
-        )
-        with open(path) as fh:
-            return json.load(fh)
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+    from linc_nerve.core.ios_apps_logs import devicectl_info_json
+
+    return devicectl_info_json(serial, info, check=True)
 
 
 def _devicectl_pid(serial: str, package: str) -> int | None:
     """Get PID for a bundle ID on a physical iOS device via devicectl."""
-    app_url: str | None = None
-    try:
-        data = _devicectl_json(serial, "apps")
-        for app in data.get("result", {}).get("apps", []):
-            if app.get("bundleIdentifier") == package:
-                app_url = app.get("url", "")
-                break
-    except Exception:
-        return None
-
-    if not app_url:
-        return None
+    from linc_nerve.core.ios_apps_logs import find_physical_bundle_pids
 
     try:
-        data = _devicectl_json(serial, "processes")
-        url_prefix = app_url.rstrip("/")
-        for proc in data.get("result", {}).get("runningProcesses", []):
-            exe = proc.get("executable", "")
-            if exe.startswith(url_prefix):
-                return proc.get("processIdentifier")
+        pids = find_physical_bundle_pids(serial, package)
+        return pids[0] if pids else None
     except Exception:
         return None
-
-    return None
 
 
 def _get_ios_simulator_pid(serial: str, package: str) -> int | None:
     try:
+        XcodeNotReadyError.check(xcode_first_launch_ready())
         proc_out = subprocess.run(
             ["xcrun", "simctl", "spawn", serial, "launchctl", "list"],
             capture_output=True,

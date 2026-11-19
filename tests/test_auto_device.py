@@ -26,7 +26,7 @@ from unittest.mock import patch
 
 import anyio
 import pytest
-from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
+from linc_cli_kit import SDKToolError
 
 from linc_nerve.cli.main import _registry_server
 from linc_nerve.core import action_log
@@ -68,10 +68,8 @@ def _android_device(serial: str = "PIXEL8PRO") -> NerveDevice:
 
 def _mcp_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     srv = _registry_server()
-    blocks = anyio.run(srv.call_tool, tool_name, arguments)
-    if isinstance(blocks, tuple):
-        blocks = blocks[0]
-    return json.loads(blocks[0].text)
+    result = anyio.run(srv.call_tool, tool_name, arguments)
+    return json.loads(result.content[0].text)
 
 
 @pytest.fixture(name="env")
@@ -288,7 +286,7 @@ def test_non_opted_tool_empty_device_returns_unchanged_error(
     assert res == {"error": "Device '' not found. Run nerve_discover to list devices."}
     assert fake.calls == []
 
-    with pytest.raises(FastMCPToolError):
+    with pytest.raises(SDKToolError):
         anyio.run(_registry_server().call_tool, "nerve_tap", {"x": 100, "y": 200})
 
 

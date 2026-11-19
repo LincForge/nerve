@@ -20,21 +20,50 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
 
-from linc_nerve.core.observability import linc_home
+MAX_SINCE_HOURS = 87_600
+MAX_TOP_N = 10_000
+
+
+def validate_since_hours(since_hours: Any) -> int | float | None:
+    """Validate *since_hours* is None or a finite number in 0..87600 (never bool)."""
+    if since_hours is None:
+        return None
+    if (
+        isinstance(since_hours, bool)
+        or not isinstance(since_hours, (int, float))
+        or not math.isfinite(since_hours)
+        or since_hours < 0
+        or since_hours > MAX_SINCE_HOURS
+    ):
+        raise ValueError(
+            f"since_hours must be a finite number in 0..{MAX_SINCE_HOURS}, got {since_hours!r}"
+        )
+    return since_hours
+
+
+def validate_bounded_count(value: Any, name: str, *, maximum: int = MAX_TOP_N) -> int:
+    """Validate *value* is an integer (never bool) in 0..*maximum*."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > maximum:
+        raise ValueError(f"{name} must be an integer in 0..{maximum}, got {value!r}")
+    return value
+
 
 # Tool/server names that only ever appear from test fixtures — never real
-# traffic. Used to quarantine junk records (see imp 01606251: the observability
+# traffic. Used to quarantine junk records (the observability
 # test suite leaked these into the prod log when LINC_HOME wasn't isolated).
 _JUNK_TOOL_SUBSTRINGS = ("dummy", "fake", "magicmock", "_bad")
 
 
 def _default_log_path() -> Path:
-    """Resolve the mcp-calls log path; honors LINC_HOME for tests."""
-    return linc_home() / "mcp-calls.jsonl"
+    """Resolve the mcp-calls log path; honors artifacts root and LINC_HOME."""
+    from linc_nerve.core.engagement import mcp_call_log_path
+
+    return mcp_call_log_path()
 
 
 def _is_junk(rec: dict) -> bool:
@@ -188,6 +217,8 @@ def compute_usage_stats(
         success_pct, p50/p95/avg latency, last_seen), ``dormant``, and a
         ``junk`` breakdown.
     """
+    since_hours = validate_since_hours(since_hours)
+    top_n = validate_bounded_count(top_n, "top_n")
     if log_path is None:
         log_path = _default_log_path()
     records = _iter_records(log_path, include_rotated)

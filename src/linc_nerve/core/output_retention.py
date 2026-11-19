@@ -167,7 +167,12 @@ def dir_is_live(dir_path: str) -> bool:
 
 def create_locked_output_dir(tmp_root: str | None = None) -> tuple[str, BinaryIO | None]:
     """Create a fresh private ``nerve-output-*`` dir and take its owner lock."""
-    path = tempfile.mkdtemp(prefix=OUTPUT_DIR_PREFIX, dir=tmp_root)
+    parent = tmp_root
+    if parent is None:
+        from linc_nerve.core.engagement import output_parent
+
+        parent = output_parent()
+    path = tempfile.mkdtemp(prefix=OUTPUT_DIR_PREFIX, dir=parent)
     return path, acquire_dir_lock(path)
 
 
@@ -276,7 +281,13 @@ def cleanup_output_dirs(
     A dir whose owner process is alive (lock held, or lock state unknown) is always skipped.
     Dirs modified within the last 60 s are also skipped unless *remove_all* is True.
     """
-    root = Path(tmp_root if tmp_root is not None else tempfile.gettempdir())
+    if tmp_root is not None:
+        root = Path(tmp_root)
+    else:
+        from linc_nerve.core.engagement import cleanup_output_root, default_temp_dir
+
+        configured = cleanup_output_root()
+        root = Path(configured) if configured is not None else default_temp_dir()
     current_time = time.time() if now is None else float(now)
     window = -1.0 if remove_all else CLEANUP_ACTIVE_WINDOW_S
     uid = os.getuid()

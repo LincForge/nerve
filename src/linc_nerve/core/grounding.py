@@ -15,11 +15,14 @@ OSI license; it restricts some fields of use), so it is the optional extra
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import math
 import os
 import re
 import subprocess
+import time
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -44,6 +47,11 @@ KEYCHAIN_SERVICE_ENV = "NERVE_KEYCHAIN_SERVICE"
 # and at least this far ahead of the runner-up. Otherwise nothing is tapped.
 MIN_TAP_CONFIDENCE = 0.5
 MIN_TAP_MARGIN = 0.1
+GROUNDED_TAP_CAP = 64
+GROUNDED_TAP_TTL_S = 60.0
+SCREEN_HASH_SIZE = 16
+SCREEN_HASH_THRESHOLD = 5
+SCREEN_CHANGED_ERROR = "Screen changed between grounding and tap; re-run the prompt"
 # Wire responses larger than this, or claiming a mask bigger than the image,
 # are rejected before the (quota-free) mask decoder sees them.
 MAX_SAM_RESPONSE_CHARS = 2_000_000
@@ -336,7 +344,8 @@ def require_grounding(api_key: str | None = None) -> str:
     """
     if not grounding_enabled():
         raise ValueError(DISABLED_ERROR)
-    _sam_parser()
+    if ground_visual_targets is _DEFAULT_GROUND_VISUAL_TARGETS:
+        _sam_parser()
     return resolve_meta_api_key(api_key)
 
 
@@ -380,6 +389,9 @@ def ground_visual_targets(
 
     raw_text = _call_sam31_api(png_bytes, clean_prompt, resolved_key)
     return parse_sam31_records(raw_text, clean_prompt, (img_w, img_h), screen_size=screen_size)
+
+
+_DEFAULT_GROUND_VISUAL_TARGETS = ground_visual_targets
 
 
 def render_grounded_overlay(
@@ -433,11 +445,14 @@ def render_grounded_overlay(
     return out.getvalue()
 
 
+_UNLABELLED_HINT_RATIO = 0.5
+
+
 def should_suggest_visual_grounding(
     elements: list[dict[str, Any]] | None,
     elements_error: str | None = None,
 ) -> bool:
-    """Return True when the UI tree is empty, errored, or has unlabelled clickable nodes."""
+    """Return True when the UI tree is empty, errored, or most clickable nodes are unlabelled."""
     if not grounding_enabled():
         return False
     if elements_error or not elements:
@@ -450,7 +465,7 @@ def should_suggest_visual_grounding(
         for el in clickable
         if not (el.get("text") or el.get("desc") or el.get("id") or el.get("resource_id"))
     ]
-    return len(unlabelled) > 0
+    return len(unlabelled) / len(clickable) >= _UNLABELLED_HINT_RATIO
 
 
 VISUAL_GROUNDING_HINT = (
@@ -483,6 +498,77 @@ def select_tap_target(targets: list[dict[str, Any]]) -> dict[str, Any] | str:
     return targets[0]
 
 
+def screenshot_hash(image_bytes: bytes) -> int:
+    """Compute a 256-bit (16x16) average perceptual hash from PNG bytes."""
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        gray = img.convert("L").resize(
+            (SCREEN_HASH_SIZE, SCREEN_HASH_SIZE), Image.Resampling.LANCZOS
+        )
+        pixels = list(gray.tobytes())
+    if all(p == pixels[0] for p in pixels):
+        return int.from_bytes(hashlib.sha256(image_bytes).digest(), "big")
+    avg = sum(pixels) / len(pixels)
+    bits = 0
+    for px in pixels:
+        bits = (bits << 1) | (1 if px >= avg else 0)
+    return bits
+
+
+def screenshots_match(expected_hash: int, current_png: bytes) -> bool:
+    """Return True when *current_png* is within ``SCREEN_HASH_THRESHOLD`` bits."""
+    return (expected_hash ^ screenshot_hash(current_png)).bit_count() <= SCREEN_HASH_THRESHOLD
+
+
+class GroundedTapStore(OrderedDict[tuple[str, int, int], dict[str, Any]]):
+    """Bounded ``(device, x, y) -> grounding metadata`` store with monotonic TTL."""
+
+    def __init__(
+        self,
+        cap: int = GROUNDED_TAP_CAP,
+        ttl_s: float = GROUNDED_TAP_TTL_S,
+    ) -> None:
+        super().__init__()
+        self.cap = cap
+        self.ttl_s = ttl_s
+        self._timestamps: dict[tuple[str, int, int], float] = {}
+        self._screen_hashes: dict[tuple[str, int, int], int] = {}
+
+    def __setitem__(self, key: tuple[str, int, int], value: dict[str, Any]) -> None:
+        now = time.monotonic()
+        if key in self:
+            super().__delitem__(key)
+        while len(self) >= self.cap:
+            oldest, _ = self.popitem(last=False)
+            self._timestamps.pop(oldest, None)
+            self._screen_hashes.pop(oldest, None)
+        clean = {k: v for k, v in value.items() if k != "_screen_hash"}
+        super().__setitem__(key, clean)
+        self._timestamps[key] = now
+        if "_screen_hash" in value:
+            self._screen_hashes[key] = int(value["_screen_hash"])
+
+    def screen_hash(self, device: str, x: int | None, y: int | None) -> int | None:
+        """Return the recorded screenshot hash for ``(device, x, y)``, or None."""
+        if x is None or y is None:
+            return None
+        return self._screen_hashes.get((device, int(x), int(y)))
+
+    def pop(self, key: tuple[str, int, int], default: Any = None) -> Any:  # type: ignore[override]
+        entry = super().pop(key, None)
+        ts = self._timestamps.pop(key, None)
+        self._screen_hashes.pop(key, None)
+        if entry is None:
+            return default
+        if ts is not None and (time.monotonic() - ts) > self.ttl_s:
+            return default
+        return entry
+
+    def clear(self) -> None:
+        super().clear()
+        self._timestamps.clear()
+        self._screen_hashes.clear()
+
+
 def attach_grounded_tap(
     res: dict[str, Any],
     store: dict[tuple[str, int, int], dict[str, Any]],
@@ -495,4 +581,28 @@ def attach_grounded_tap(
         grounded = store.pop((device, int(x), int(y)), None)
         if grounded is not None:
             res["grounded"] = grounded
+    return res
+
+
+def verified_tap(
+    ctrl: Any,
+    device: str,
+    x: int | None,
+    y: int | None,
+    res: dict[str, Any],
+    screen_hash: int | None,
+) -> dict[str, Any]:
+    """Verify a grounded screen has not changed, then issue ``ctrl.tap``."""
+    grounded = res.get("grounded")
+    if (
+        grounded is not None
+        and screen_hash is not None
+        and not screenshots_match(screen_hash, ctrl.screenshot(device))
+    ):
+        return {
+            "error": SCREEN_CHANGED_ERROR,
+            "prompt": grounded.get("prompt", ""),
+            "grounded": grounded,
+        }
+    ctrl.tap(device, x, y)
     return res

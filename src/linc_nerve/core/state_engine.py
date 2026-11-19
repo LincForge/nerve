@@ -153,7 +153,6 @@ class DeviceStateSession:
     last_elements_hash: str = ""
     # Use ``None`` sentinels for foreground/orientation so the FIRST observation
     # establishes baseline silently rather than reporting a phantom change.
-    # See bug 2b2dbef6.
     last_foreground: dict[str, str] | None = None
     last_orientation: str | None = None
     frames_since_change: int = 0
@@ -282,8 +281,10 @@ class DeviceStateSession:
 class StateSessionManager:
     """Manages state sessions for all connected devices.
 
-    Thread-safe: FastMCP dispatches tool handlers from a thread pool,
-    so concurrent calls may access ``_sessions`` simultaneously.
+    Thread-safe: nerve's MCP tool wrappers run each tool body on worker
+    threads (``_run_on_device`` / ``anyio.to_thread``) and the daemon runs
+    tools on its executor, so concurrent calls may access ``_sessions``
+    simultaneously.
     """
 
     def __init__(self) -> None:
@@ -330,6 +331,8 @@ def wait_for_stable_ui(
     poll_ms: int = 50,
     threshold: int = SCREENSHOT_CHANGE_THRESHOLD,
     pil_mode: bool = False,
+    sleep: Any = time.sleep,
+    clock: Any = time.monotonic,
 ) -> dict[str, Any]:
     """Poll screenshots until the UI is visually stable.
 
@@ -345,13 +348,15 @@ def wait_for_stable_ui(
         threshold: Hamming distance threshold for "changed" (default 5).
         pil_mode: If True, screenshot_fn returns PIL Image and hashing skips PNG decode.
             Result includes "last_frame_pil" key with PIL Image.
+        sleep: Sleep callable taking seconds (default ``time.sleep``).
+        clock: Monotonic clock callable returning seconds (default ``time.monotonic``).
 
     Returns:
         {"stable": bool, "elapsed_ms": float, "polls": int, "last_frame": bytes|None,
          "last_frame_pil": Image|None}
     """
     hash_fn = _average_hash_pil if pil_mode else _average_hash
-    t0 = time.monotonic()
+    t0 = clock()
     deadline = t0 + timeout_ms / 1000.0
     polls = 0
     last_hash: int | None = None
@@ -367,16 +372,16 @@ def wait_for_stable_ui(
         if last_hash is None:
             # First frame — start the stability clock
             last_hash = current_hash
-            stable_since = time.monotonic()
+            stable_since = clock()
         else:
             distance = _hamming_distance(last_hash, current_hash)
             if distance > threshold:
                 # Screen changed — reset stability clock
                 last_hash = current_hash
-                stable_since = time.monotonic()
+                stable_since = clock()
             # else: still stable, stable_since unchanged
 
-        now = time.monotonic()
+        now = clock()
         if now - require(stable_since, "UI stability start time") >= stable_ms / 1000.0:
             return {
                 "stable": True,
@@ -395,4 +400,68 @@ def wait_for_stable_ui(
                 "last_frame_pil": last_data if pil_mode else None,
             }
 
-        time.sleep(poll_ms / 1000.0)
+        sleep(poll_ms / 1000.0)
+
+
+def validate_idle_timeout_ms(timeout_ms: Any, name: str) -> int:
+    """Validate that *timeout_ms* is an int (not bool) in 0..10000."""
+    if (
+        isinstance(timeout_ms, bool)
+        or not isinstance(timeout_ms, int)
+        or timeout_ms < 0
+        or timeout_ms > 10_000
+    ):
+        raise ValueError(f"{name} must be an int in 0..10000, got {timeout_ms!r}")
+    return timeout_ms
+
+
+def _capture_failed_reason(exc: BaseException) -> str:
+    """Format a screenshot exception into a bounded capture_failed reason."""
+    return f"capture_failed: {type(exc).__name__}: {str(exc)[:200]}"
+
+
+def wait_for_idle(
+    screenshot_fn: Any,
+    timeout_ms: int,
+    *,
+    pil_mode: bool = False,
+    sleep: Any = time.sleep,
+    clock: Any = time.monotonic,
+) -> dict[str, Any]:
+    """Wait for UI to settle within *timeout_ms*, reporting stability and reason."""
+    validate_idle_timeout_ms(timeout_ms, "timeout_ms")
+    t0 = clock()
+    polls = 0
+
+    def _poll_frame() -> Any:
+        nonlocal polls
+        polls += 1
+        return screenshot_fn()
+
+    try:
+        raw = wait_for_stable_ui(
+            _poll_frame,
+            timeout_ms=timeout_ms,
+            pil_mode=pil_mode,
+            sleep=sleep,
+            clock=clock,
+        )
+    except Exception as exc:
+        elapsed_ms = round((clock() - t0) * 1000, 1)
+        remaining_ms = timeout_ms - elapsed_ms
+        if remaining_ms > 0:
+            sleep(remaining_ms / 1000.0)
+        final_ms = max(round((clock() - t0) * 1000, 1), float(timeout_ms))
+        return {
+            "stable": False,
+            "elapsed_ms": final_ms,
+            "polls": polls,
+            "reason": _capture_failed_reason(exc),
+            "last_frame": None,
+            "last_frame_pil": None,
+        }
+
+    return {
+        **raw,
+        "reason": "" if raw["stable"] else "timeout",
+    }

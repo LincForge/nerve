@@ -131,9 +131,10 @@ def _nerve_screenshot_sync(
         if annotate:
             data, annotate_extras = _annotate_best_effort(ctrl, device, data)
 
+        from linc_nerve.core.engagement import write_private_bytes
+
         path = _core._next_output_path(device, "screenshot")
-        with open(path, "wb") as f:
-            f.write(data)
+        write_private_bytes(path, data)
 
         result = _build_screenshot_result(path, device, data, annotate_extras)
         # Carries the captured PNG bytes so the MCP tool wrapper (_core.py)
@@ -380,9 +381,10 @@ def _nerve_stream_screenshot_sync(device: str, inline: bool = False) -> dict[str
                 "device": device,
                 "latency_ms": latency_ms,
             }
+        from linc_nerve.core.engagement import write_private_bytes
+
         path = _core._next_output_path(device, "stream_screenshot")
-        with open(path, "wb") as f:
-            f.write(data)
+        write_private_bytes(path, data)
         return {
             "screenshot": path,
             "size_bytes": len(data),

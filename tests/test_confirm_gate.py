@@ -152,11 +152,11 @@ class TestDestructiveHintAnnotations:
         for tool_name in DESTRUCTIVE_TOOLS:
             tool = by_name[tool_name]
             assert tool.annotations is not None, tool_name
-            assert tool.annotations.destructiveHint is True, tool_name
+            assert tool.annotations.destructive_hint is True, tool_name
 
         for tool_name in ("nerve_tap", "nerve_screenshot"):
             tool = by_name[tool_name]
-            has_hint = tool.annotations is not None and tool.annotations.destructiveHint is True
+            has_hint = tool.annotations is not None and tool.annotations.destructive_hint is True
             assert not has_hint, tool_name
 
 

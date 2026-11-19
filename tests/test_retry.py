@@ -590,20 +590,19 @@ class TestInstallSubprocess:
                 side_effect=[subprocess.TimeoutExpired(cmd="adb", timeout=120), good],
             ),
             patch("time.sleep"),
+            pytest.raises(TimeoutError),
         ):
             ctrl.install("ABC", "/tmp/app.apk")
 
     def test_install_exhausts_retries(self) -> None:
-        import subprocess as _sp
-
         ctrl = _make_controller()
         with (
             patch(
                 "subprocess.run",
-                side_effect=_sp.TimeoutExpired(cmd="adb", timeout=120),
+                side_effect=OSError("broken pipe"),
             ),
             patch("time.sleep"),
-            pytest.raises(TimeoutError),
+            pytest.raises(OSError),
         ):
             ctrl.install("ABC", "/tmp/app.apk")
 

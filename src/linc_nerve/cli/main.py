@@ -40,8 +40,9 @@ from linc_nerve.live_stderr import configure_structlog_to_stderr
 configure_structlog_to_stderr()
 
 from linc_nerve.cli.errors import honest_error, honest_toolerror  # noqa: E402
-from linc_nerve.core import adb_health  # noqa: E402
+from linc_nerve.core import adb_health, engagement, timeouts  # noqa: E402
 from linc_nerve.core.android import AndroidController  # noqa: E402
+from linc_nerve.core.contracts import require  # noqa: E402
 from linc_nerve.core.ios import IOSController  # noqa: E402
 from linc_nerve.daemon.polling import DeviceDiff, poll_devices  # noqa: E402
 from linc_nerve.daemon.wda_manager import DaemonWDAManager  # noqa: E402
@@ -55,6 +56,7 @@ from linc_nerve.mcp.sse_server import (  # noqa: E402
 
 
 @click.group()
+@click.version_option(package_name="linc-nerve", prog_name="nerve")
 def main() -> None:
     """Nerve — unified device control for LINC.
 
@@ -91,52 +93,17 @@ def _registry_server() -> Any:
     return server
 
 
-def _patch_mcp_zero_buffers() -> None:
-    """Monkey-patch zero-buffer channels in the MCP SDK.
-
-    mcp 1.26.0 uses ``anyio.create_memory_object_stream(0)`` (unbuffered
-    rendezvous channels) in two places:
-
-    1. **Transport layer** (``mcp.server.stdio.stdio_server``) — we replace
-       this entirely with ``buffered_stdio_server``.
-    2. **Session layer** (``mcp.server.session.ServerSession.__init__``) —
-       the ``_incoming_message_stream`` uses buffer=0, creating a deadlock
-       between ``_receive_loop`` pushing requests and ``Server.run()``
-       consuming them.  After 2 successful round-trips, the rendezvous
-       timing fails and the 3rd+ request hangs forever.
-
-    This patch wraps ``ServerSession.__init__`` to replace the zero-buffer
-    stream with a buffered one (size=32) after the original init runs.
-    """
-    import anyio
-    from mcp.server.session import ServerRequestResponder, ServerSession
-
-    _original_init = ServerSession.__init__
-
-    def _patched_init(self: Any, *args: Any, **kwargs: Any) -> None:
-        _original_init(self, *args, **kwargs)
-        # Replace the zero-buffer incoming message stream with a buffered one.
-        # The original creates: anyio.create_memory_object_stream(0)
-        # We need buffer > 0 so _receive_loop can push requests without
-        # waiting for Server.run() to be in an exact receive-ready state.
-        self._incoming_message_stream_writer, self._incoming_message_stream_reader = (
-            anyio.create_memory_object_stream[ServerRequestResponder](32)
-        )
-
-    ServerSession.__init__ = _patched_init
-
-
 @main.command()
 def bellows() -> None:
     """Start the Nerve MCP server (stdio transport).
 
-    Patches two zero-buffer deadlocks in mcp 1.26.0:
-    1. Transport-level: replaced with buffered_stdio_server
-    2. Session-level: ServerSession._incoming_message_stream patched to buffer=32
+    Serves over ``buffered_stdio_server`` (native asyncio pipes, buffered channels)
+    instead of ``mcp.server.stdio.stdio_server``, whose channels are zero-buffer
+    rendezvous streams (still so in mcp 2.3). mcp 1.x also needed a session-layer
+    monkeypatch of ``ServerSession``'s incoming stream; mcp 2.x has no such stream,
+    so only the transport replacement remains.
     """
     import anyio
-
-    _patch_mcp_zero_buffers()
 
     from linc_nerve.mcp.server import server
     from linc_nerve.mcp.sse_server import start_sse_server
@@ -146,11 +113,14 @@ def bellows() -> None:
         async with anyio.create_task_group() as tg:
             tg.start_soon(start_sse_server)
             async with buffered_stdio_server() as (read_stream, write_stream):
-                await server._mcp_server.run(
+                await server._lowlevel_server.run(
                     read_stream,
                     write_stream,
-                    server._mcp_server.create_initialization_options(),
+                    server._lowlevel_server.create_initialization_options(),
                 )
+            # stdin EOF ended the MCP session: stop the HTTP side too, or bellows
+            # outlives its client (it serves forever on NERVE_HTTP_PORT).
+            tg.cancel_scope.cancel()
 
     anyio.run(_run)
 
@@ -328,9 +298,10 @@ def daemon(port: int) -> None:
 
 _DAEMON_ONLY = frozenset(
     {
+        # Multi-call capture handles live across invocations in daemon memory;
+        # `nerve_record_fixed` is single-shot self-terminating so local fallback works.
         "nerve_record_start",
         "nerve_record_stop",
-        "nerve_record_fixed",
         "nerve_stream_start",
         "nerve_stream_stop",
         "nerve_stream_status",
@@ -413,6 +384,33 @@ def _with_default_owner(
     return {**payload, "owner": default}
 
 
+def _call_in_process_under_engagement(
+    transport: NerveTransport, spec: Any, payload: dict[str, Any]
+) -> Any:
+    """Execute *spec* in-process while ``NERVE_ENGAGEMENT`` is set.
+
+    Never contacts ``:8111``, ``daemon.port``, or ``LINC_NERVE_DAEMON`` because
+    ``/health`` reports no engagement field to confirm parity. Checks engagement
+    config before ``_ensure_initialized()`` so misconfiguration fails closed
+    without creating ``devices.db``.
+    """
+    refusal = _core._engagement_refusal(spec.name)
+    if refusal is not None:
+        return refusal
+    if spec.name in transport.daemon_only:
+        raise ToolError(
+            f"{transport.tool} daemon cannot be used for daemon-only tool '{spec.name}' "
+            f"while {engagement.ENGAGEMENT_ENV} is active",
+            code="DAEMON_UNAVAILABLE",
+            category="unavailable",
+            hint=(
+                "use a single-shot CLI command or an MCP session under "
+                f"{engagement.ENGAGEMENT_ENV}"
+            ),
+        )
+    return require(transport.fallback, "local transport").call(spec, payload)
+
+
 class NerveTransport(HttpDaemonTransport):
     """HttpDaemonTransport that raises a precise ToolError for nerve's well-known error shapes.
 
@@ -426,10 +424,15 @@ class NerveTransport(HttpDaemonTransport):
 
     def call(self, spec: Any, payload: dict[str, Any], *, timeout: float | None = None) -> Any:
         payload = _with_default_owner(spec.name, payload, os.environ)
+        if timeout is None and spec.name in timeouts.CLI_DEFAULT_S:
+            timeout = timeouts.cli_default(spec.name)
         try:
-            result = super().call(spec, payload, timeout=timeout)
+            if os.environ.get(engagement.ENGAGEMENT_ENV):
+                result = _call_in_process_under_engagement(self, spec, payload)
+            else:
+                result = super().call(spec, payload, timeout=timeout)
         except ToolError as exc:
-            raise honest_toolerror(exc) from exc
+            raise honest_toolerror(exc, spec.name) from exc
         mapped = honest_error(result)
         if mapped is not None:
             raise mapped
@@ -509,13 +512,22 @@ def discover() -> None:
 @main.command()
 @click.argument("device")
 @click.option("-o", "--output", "output", help="Output PNG file path", type=click.Path())
+@click.option(
+    "--full-resolution",
+    is_flag=True,
+    default=False,
+    help="Capture raw physical display pixels without agent downscaling.",
+)
 @_contract
-def screenshot(device: str, output: str | None) -> None:
+def screenshot(device: str, output: str | None, full_resolution: bool = False) -> None:
     """Capture a screenshot from a device. Example: nerve screenshot SERIAL -o shot.png"""
     import shutil
 
     ctx = click.get_current_context()
-    res = _call("nerve_screenshot", {"device": device})
+    payload: dict[str, Any] = {"device": device}
+    if full_resolution:
+        payload["full_resolution"] = True
+    res = _call("nerve_screenshot", payload)
     if not res.get("error"):
         target = output or current_output()
         src_path = res.get("screenshot")
@@ -547,13 +559,23 @@ def screenshot(device: str, output: str | None) -> None:
         "PACKAGE to let the system pick a handler, which may show a chooser."
     ),
 )
+@click.option(
+    "--activity",
+    default="",
+    help=(
+        "Android activity to start (fully qualified). Needed when PACKAGE has more than "
+        "one launcher activity."
+    ),
+)
 @_contract
-def launch(device: str, package: str, uri: str = "") -> None:
+def launch(device: str, package: str, uri: str = "", activity: str = "") -> None:
     """Launch an app on a device. Example: nerve launch SERIAL com.android.vending --uri 'market://details?id=org.example.app'"""
     ctx = click.get_current_context()
     payload: dict[str, Any] = {"device": device, "package": package}
     if uri:
         payload["uri"] = uri
+    if activity:
+        payload["activity"] = activity
     res = _call("nerve_launch", payload)
     ctx.exit(_emit(res, tool="launch", renderer=lambda r: f"Launched {package} on {device}"))
 
@@ -585,11 +607,20 @@ def elements(device: str) -> None:
 @click.argument("device")
 @click.argument("x", type=int)
 @click.argument("y", type=int)
+@click.option(
+    "--wait-idle-ms",
+    default=0,
+    type=int,
+    help="Settle wait in ms.",
+)
 @_contract
-def tap(device: str, x: int, y: int) -> None:
+def tap(device: str, x: int, y: int, wait_idle_ms: int = 0) -> None:
     """Tap coordinates on a device screen. Example: nerve tap SERIAL 200 400"""
     ctx = click.get_current_context()
-    res = _call("nerve_tap", {"device": device, "x": x, "y": y})
+    payload: dict[str, Any] = {"device": device, "x": x, "y": y}
+    if wait_idle_ms:
+        payload["wait_idle_ms"] = wait_idle_ms
+    res = _call("nerve_tap", payload)
     ctx.exit(_emit(res, tool="tap", renderer=lambda r: f"Tapped ({x}, {y}) on {device}"))
 
 

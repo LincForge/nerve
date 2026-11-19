@@ -124,7 +124,7 @@ class TestWrapInlineImage:
 
         assert len(content) == 2
         image_content = content[1].to_image_content()
-        assert image_content.mimeType == "image/png"
+        assert image_content.mime_type == "image/png"
         decoded = base64.b64decode(image_content.data)
         assert decoded[:8] == _PNG_HEADER
 
@@ -144,7 +144,7 @@ class TestWrapInlineImage:
         content = _core._wrap_inline_image(self._result_with_inline_bytes(png))
 
         image_content = content[1].to_image_content()
-        assert image_content.mimeType in ("image/png", "image/jpeg")
+        assert image_content.mime_type in ("image/png", "image/jpeg")
         assert len(image_content.data) <= 786432
         decoded = base64.b64decode(image_content.data)
         assert decoded[:8] == _PNG_HEADER or decoded[:3] == _JPEG_HEADER
@@ -152,7 +152,7 @@ class TestWrapInlineImage:
 
 class TestDeviceToolWrapperInlineImageBranch:
     """Drives the ``device_tool`` async ``wrapper`` (not ``_wrap_inline_image``
-    directly) end-to-end through FastMCP's ``server.call_tool``, so the
+    directly) end-to-end through MCPServer's ``server.call_tool``, so the
     wrapper's own ``if isinstance(result, dict) and _INLINE_IMAGE_KEY in
     result`` branch (both sides) gets exercised — closing the CRAP-ratchet
     coverage gap ``TestWrapInlineImage`` above left on ``device_tool`` itself.
@@ -209,12 +209,12 @@ class TestDeviceToolWrapperInlineImageBranch:
         ``_INLINE_IMAGE_KEY`` (set by ``_nerve_screenshot_sync``), so the
         ``device_tool`` wrapper itself — not just ``_wrap_inline_image`` in
         isolation — must route into the inline-image conversion and hand
-        FastMCP a ``[dict, Image]`` pair that converts to a text block plus
+        MCPServer a ``[dict, Image]`` pair that converts to a text block plus
         an ``ImageContent`` block.
         """
         import asyncio
 
-        # Registers nerve_screenshot with FastMCP (decorator runs at import
+        # Registers nerve_screenshot with MCPServer (decorator runs at import
         # time) — needed when this file runs standalone, independent of test
         # execution order within the file/class below.
         from linc_nerve.mcp.screenshot_tools import _nerve_screenshot_sync  # noqa: F401
@@ -222,9 +222,9 @@ class TestDeviceToolWrapperInlineImageBranch:
         png = _make_png(540, 960)
         self._reset_and_setup(png)
 
-        content = asyncio.run(
-            _core.server.call_tool("nerve_screenshot", {"device": "PIXEL8PRO"})
-        )
+        result = asyncio.run(_core.server.call_tool("nerve_screenshot", {"device": "PIXEL8PRO"}))
+        assert result.is_error is False
+        content = result.content
 
         assert len(content) == 2
         text_block, image_block = content
@@ -248,7 +248,7 @@ class TestDeviceToolWrapperInlineImageBranch:
         """
         import asyncio
 
-        # Registers nerve_tap with FastMCP (decorator runs at import time) —
+        # Registers nerve_tap with MCPServer (decorator runs at import time) —
         # needed when this file runs standalone, without another test module
         # having already imported linc_nerve.mcp.server (which eagerly
         # imports every tool module).
@@ -258,19 +258,18 @@ class TestDeviceToolWrapperInlineImageBranch:
         mock_android, _ = self._reset_and_setup(png)
         mock_android.tap.return_value = None
 
-        content = asyncio.run(
+        result = asyncio.run(
             _core.server.call_tool("nerve_tap", {"device": "PIXEL8PRO", "x": 10, "y": 20})
         )
-        # _nerve_tap_sync is annotated ``-> dict[str, Any]``, so FastMCP infers
-        # an output schema and convert_result returns
-        # (unstructured_content, structured_content) instead of a bare list
-        # (unlike nerve_screenshot's ``-> Any`` above). Either way, the
-        # unstructured half is what the wrapper's sentinel branch touches.
-        unstructured = content[0] if isinstance(content, tuple) else content
+        # mcp 2.x returns a CallToolResult: ``content`` is the unstructured half
+        # the wrapper's sentinel branch touches (``structured_content`` carries
+        # the dict for tools annotated ``-> dict[str, Any]`` such as nerve_tap).
+        assert result.is_error is False
+        unstructured = result.content
 
         # No inline image block was added — just the plain text/JSON block.
         assert len(unstructured) == 1
-        assert "\"success\": true" in unstructured[0].text.lower()
+        assert '"success": true' in unstructured[0].text.lower()
         assert _core._INLINE_IMAGE_KEY not in unstructured[0].text
 
 
@@ -338,6 +337,6 @@ class TestNerveScreenshotSyncSetsSentinel:
 
         # And _wrap_inline_image can consume it end-to-end.
         content = _core._wrap_inline_image(dict(result))
-        assert content[1].to_image_content().mimeType == "image/png"
+        assert content[1].to_image_content().mime_type == "image/png"
         assert "screenshot" in content[0]
         assert _core._INLINE_IMAGE_KEY not in content[0]

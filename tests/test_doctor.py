@@ -129,6 +129,99 @@ class TestCheckWda:
         assert r.status == "warn"
         assert "WDA_TEAM_ID" in r.hint
 
+    def test_project_dir_unset_ok_when_daemon_configured(self) -> None:
+        r = check_wda_project("", False, daemon_configured=True)
+        assert r == CheckResult(
+            name="wda-project", status="ok", detail="configured in running daemon"
+        )
+
+    def test_project_dir_unset_default_daemon_flag_warns(self) -> None:
+        """[contract] omitting daemon_configured means "no daemon reading" -> warn."""
+        r = check_wda_project("", False)
+        assert r.status == "warn"
+        assert r.detail != "configured in running daemon"
+
+    def test_team_id_unset_default_daemon_flag_warns(self) -> None:
+        """[contract] omitting daemon_configured means "no daemon reading" -> warn."""
+        r = check_wda_team_id("")
+        assert r.status == "warn"
+        assert r.detail != "configured in running daemon"
+
+    def test_truthy_non_bool_daemon_flag_still_warns(self) -> None:
+        """[contract] hostile input: only the literal True counts as configured."""
+        for hostile in ("1", 1, "true", [True]):
+            assert check_wda_project("", False, daemon_configured=hostile).status == "warn"  # type: ignore[arg-type]
+            assert check_wda_team_id("", daemon_configured=hostile).status == "warn"  # type: ignore[arg-type]
+
+    def test_project_dir_missing_still_fails_when_daemon_configured(self) -> None:
+        r = check_wda_project("/missing/path", False, daemon_configured=True)
+        assert r.status == "fail"
+
+    def test_team_id_unset_ok_when_daemon_configured(self) -> None:
+        r = check_wda_team_id("", daemon_configured=True)
+        assert r == CheckResult(
+            name="wda-team-id", status="ok", detail="configured in running daemon"
+        )
+
+    def test_run_checks_threads_daemon_wda_booleans(self) -> None:
+        probes = _green_probes(
+            wda_project_dir="",
+            wda_checkout_exists=False,
+            wda_team_id="",
+            daemon_health={
+                "ok": True,
+                "package_version": "0.1.0",
+                "wda": {"project_configured": True, "team_id_configured": True},
+            },
+        )
+        by_name = {r.name: r for r in run_checks(probes)}
+        assert by_name["wda-project"] == CheckResult(
+            name="wda-project", status="ok", detail="configured in running daemon"
+        )
+        assert by_name["wda-team-id"] == CheckResult(
+            name="wda-team-id", status="ok", detail="configured in running daemon"
+        )
+
+    def test_run_checks_warns_when_daemon_wda_false_or_malformed(self) -> None:
+        for health in (
+            None,
+            {
+                "ok": True,
+                "package_version": "0.1.0",
+                "wda": {"project_configured": False, "team_id_configured": False},
+            },
+            {"ok": True, "package_version": "0.1.0", "wda": "yes"},
+            {
+                "ok": True,
+                "package_version": "0.1.0",
+                "wda": {"project_configured": "1", "team_id_configured": 1},
+            },
+        ):
+            probes = _green_probes(
+                wda_project_dir="",
+                wda_checkout_exists=False,
+                wda_team_id="",
+                daemon_health=health,
+            )
+            by_name = {r.name: r for r in run_checks(probes)}
+            assert by_name["wda-project"].status == "warn"
+            assert by_name["wda-team-id"].status == "warn"
+
+    def test_run_checks_missing_local_wda_project_still_fails_with_daemon_configured(self) -> None:
+        probes = _green_probes(
+            wda_project_dir="/missing/path",
+            wda_checkout_exists=False,
+            wda_team_id="",
+            daemon_health={
+                "ok": True,
+                "package_version": "0.1.0",
+                "wda": {"project_configured": True, "team_id_configured": True},
+            },
+        )
+        by_name = {r.name: r for r in run_checks(probes)}
+        assert by_name["wda-project"].status == "fail"
+        assert by_name["wda-team-id"].status == "ok"
+
 
 class TestCheckXcodeClt:
     def test_present_ok(self) -> None:
@@ -153,11 +246,11 @@ class TestCheckDaemon:
         assert r.status == "warn"
         assert "8111" in r.detail or "8111" in r.hint
 
-    def test_stale_daemon_version_mismatch_fails_with_kickstart_hint(self) -> None:
+    def test_stale_daemon_version_mismatch_fails_with_restart_hint(self) -> None:
         r = check_daemon({"ok": True, "package_version": "0.0.9"}, "0.1.0", 8111)
         assert r.status == "fail"
         assert "0.0.9" in r.detail and "0.1.0" in r.detail
-        assert "kickstart" in r.hint
+        assert r.hint == "Restart the daemon: it serves the code it was started with"
 
     def test_unknown_version_warns(self) -> None:
         r = check_daemon({"ok": True, "package_version": "unknown"}, "0.1.0", 8111)
@@ -340,8 +433,7 @@ def test_unreachable_daemon_is_warn_cli_falls_back_in_process() -> None:
         "no nerve daemon on 127.0.0.1:8111 — CLI calls run in-process (the daemon is optional)"
     )
     assert r.hint == (
-        "Start it: uv run nerve daemon --port 8111 "
-        "(or launchctl kickstart -k gui/$UID/com.linc.nerve-daemon)"
+        "Start it: nerve daemon --port 8111"
     )
 
 
@@ -518,6 +610,7 @@ class TestAdbProbeServerHygiene:
         from linc_nerve.cli import doctor as doctor_mod
 
         self._stub_other_probes(monkeypatch)
+        monkeypatch.delenv("ADB_SERVER_SOCKET", raising=False)  # it outranks the port
         monkeypatch.setenv("ANDROID_ADB_SERVER_PORT", "5199")
         probed_ports: list[int] = []
         calls: list[tuple[list[str], dict[str, object]]] = []
@@ -654,3 +747,47 @@ class TestDoctorHumanFlag:
         assert result.exit_code == 2
         assert "--human" in result.output
         assert "--json" in result.output
+
+
+def test_contract_daemon_health_probe_never_goes_through_an_env_proxy(monkeypatch) -> None:
+    """[contract] with HTTP_PROXY/ALL_PROXY pointing at a listener that answers 200 for
+    anything, the health probe of an unused port still reports no daemon, and the proxy
+    receives no connection."""
+    import socket
+    import threading
+
+    from linc_nerve.cli import doctor
+
+    proxy = socket.socket()
+    proxy.bind(("127.0.0.1", 0))
+    proxy.listen(4)
+    proxy.settimeout(3.0)
+    hits: list[bytes] = []
+
+    def _serve() -> None:
+        try:
+            conn, _ = proxy.accept()
+        except OSError:
+            return
+        with conn:
+            hits.append(conn.recv(4096))
+            conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{"ok":true}')
+
+    t = threading.Thread(target=_serve, daemon=True)
+    t.start()
+    url = f"http://127.0.0.1:{proxy.getsockname()[1]}"
+    for var in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(var, url)
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    unused_port = free.getsockname()[1]
+    free.close()
+    try:
+        assert doctor._probe_daemon_health(unused_port) is None
+    finally:
+        proxy.close()
+        t.join(timeout=5)
+    assert hits == []
+

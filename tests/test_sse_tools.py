@@ -84,12 +84,24 @@ async def test_health_endpoint(server_port: int) -> None:
 
 
 @pytest.mark.asyncio
-async def test_devices_endpoint_is_routed_through_sse_server(server_port: int) -> None:
+async def test_devices_endpoint_is_routed_through_sse_server(
+    server_port: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """GET /devices reaches `route_request` through the actual HTTP dispatch.
 
     Council Carmack/Lattner/Hotz P0: without wiring `/devices` into the
     `_handle_client` routing condition in sse_server.py, this returns 404.
-    Unit tests on `route_request` directly miss this gap entirely."""
+    Unit tests on `route_request` directly miss this gap entirely.
+
+    Discovery is faked: this pins routing, and a real enumeration would spawn
+    ``adb`` (forbidden by the conftest guard, and absent on CI)."""
+    from linc_nerve.core.android import AndroidController
+    from linc_nerve.core.ios import IOSController
+    from linc_nerve.daemon import http_router
+
+    monkeypatch.setattr(http_router, "_DEVICES_CACHE", None)
+    monkeypatch.setattr(AndroidController, "discover", lambda self: [])
+    monkeypatch.setattr(IOSController, "discover", lambda self: [])
     status, body = await _http_request(server_port, "GET", "/devices")
     assert status == 200
     # Either the enumeration succeeded (devices list present) or it gracefully

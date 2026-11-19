@@ -6,8 +6,7 @@
 # Override the whole file by setting NERVE_ROUTES_FILE=/abs/path/to/routes.yaml.
 # If this file (or the override) is missing or unparseable, navigation_tools
 # falls back to the hardcoded _FALLBACK_APPS dict — which mirrors this file, so
-# keep the two in sync. Full linc-manifest adoption is a separate step (goal
-# adb40f83 step 2).
+# keep the two in sync. Full manifest adoption is a separate step.
 apps:
   precisionlevel:
     package: com.lincmobile.level

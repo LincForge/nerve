@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import anyio
 import pytest
-from linc_cli_kit import registry_of
+from linc_cli_kit import SDKToolError, registry_of
 from linc_cli_kit.testing import assert_cli_parity
-from mcp.server.fastmcp.exceptions import ToolError as FastMCPToolError
 
 from linc_nerve.cli.main import _registry_server, main
 
@@ -41,5 +40,18 @@ def test_strict_tools_contract() -> None:
         assert spec.parameters.get("additionalProperties") is False, (
             f"{spec.name}: missing additionalProperties: false"
         )
-    with pytest.raises(FastMCPToolError, match="unknown_arg_xyz"):
+    with pytest.raises(SDKToolError, match="unknown_arg_xyz"):
         anyio.run(srv.call_tool, "nerve_discover", {"unknown_arg_xyz": 1})
+
+
+def test_strict_tools_contract_rejects_extra_arg_on_global_tool_before_it_runs() -> None:
+    """[contract] mcp 2.x: an unknown argument to a no-arg global tool is a ToolError naming it.
+
+    UnexpectedToolError subclasses ToolError on 2.x, so assert the exact class: argument
+    validation is an anticipated failure whose text reaches the model.
+    """
+    srv = _registry_server()
+    with pytest.raises(SDKToolError, match=r"\bx\b") as excinfo:
+        anyio.run(srv.call_tool, "nerve_session_stats", {"x": 1})
+    assert type(excinfo.value) is SDKToolError
+    assert "extra" in str(excinfo.value).lower()

@@ -3,7 +3,7 @@
 Launchd-managed daemons do not inherit the interactive shell's PATH, so
 ``shutil.which("adb")`` returns None and ``subprocess.run(["adb", ...])``
 raises ``FileNotFoundError``. The scrcpy fast path silently degrades
-(see inbox a76efc3e).
+when ``adb`` cannot be found.
 
 Resolution order:
 
@@ -53,8 +53,8 @@ def resolve_adb_path() -> str:
 ADB_PATH: str = resolve_adb_path()
 
 
-# The mini's Homebrew-installed Android Command Line Tools location — the last
-# real candidate for the `emulator` binary before giving up (linc-nerve#118).
+# Homebrew-installed Android Command Line Tools location — the last
+# real candidate for the `emulator` binary before giving up.
 _HOMEBREW_EMULATOR_PATH = Path("/opt/homebrew/share/android-commandlinetools/emulator/emulator")
 
 
@@ -67,7 +67,7 @@ def resolve_emulator_path() -> str | None:
     Unlike ``adb`` (used constantly, on every device-list poll, where a
     FileNotFoundError-on-exec is an acceptable degraded mode), silently returning
     a bare ``"emulator"`` here would mean ``_get_installed_avds`` keeps swallowing
-    the same FileNotFoundError it swallows today (reactor 8d140900) — the whole
+    the same FileNotFoundError it swallows today — the whole
     point of this resolver is to make "no emulator binary" a distinguishable,
     surfaceable state instead of a silently-empty AVD list.
 
@@ -77,8 +77,8 @@ def resolve_emulator_path() -> str | None:
     2. ``$ANDROID_SDK_ROOT/emulator/emulator`` if env var is set + file exec.
     3. ``$ANDROID_HOME/emulator/emulator`` if env var is set + file exec.
     4. ``~/Library/Android/sdk/emulator/emulator`` — macOS Android Studio default.
-    5. ``/opt/homebrew/share/android-commandlinetools/emulator/emulator`` — the
-       Mac mini bench's Homebrew-installed Android Command Line Tools location.
+    5. ``/opt/homebrew/share/android-commandlinetools/emulator/emulator`` —
+       Homebrew-installed Android Command Line Tools default location on Apple Silicon.
     6. ``None`` — no usable binary found anywhere.
     """
     which = shutil.which("emulator")

@@ -92,7 +92,7 @@ def _detect_crashes(
 
 
 # ---------------------------------------------------------------------------
-# First-class crash signature (linc-nerve#98)
+# First-class crash signature
 # ---------------------------------------------------------------------------
 #
 # `_detect_crashes` returns one record per matched log LINE. A real Android

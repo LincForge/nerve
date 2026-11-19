@@ -27,24 +27,27 @@ import errno
 import json as _json
 import os
 import platform
+import queue
 import shutil
 import socket
 import subprocess
 import sys
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 import click
 
+from linc_nerve.core.adb_health import adb_server_config_error, parse_adb_devices
 from linc_nerve.core.adb_path import ADB_PATH
 from linc_nerve.core.adb_server import AdbServerAddress, adb_server_address
 from linc_nerve.core.http_port import DEFAULT_HTTP_PORT, resolve_http_port
 from linc_nerve.core.observability import linc_home
 
 DAEMON_PORT = DEFAULT_HTTP_PORT
-DAEMON_LABEL = "com.linc.nerve-daemon"
 
 
 def required_linc_dirs() -> tuple[str, ...]:
@@ -53,6 +56,11 @@ def required_linc_dirs() -> tuple[str, ...]:
     Resolved at call time from ``core.observability.linc_home()`` so the
     check and the ``--fix`` plan follow ``LINC_HOME`` instead of ``~/.linc``.
     """
+    from linc_nerve.core import engagement
+
+    root = engagement.artifacts_root()
+    if root is not None:
+        return (str(root), str(root / "recordings"))
     home = linc_home()
     return (str(home), str(home / "nerve" / "recordings"))
 
@@ -107,6 +115,15 @@ class ProbeReport:
     missing_linc_dirs: tuple[str, ...] = field(default_factory=tuple)
     linc_home: str = ""  # resolved $LINC_HOME; "" → resolve at check time
     adb_server_listening: bool = True  # False only when doctor stopped a server it started
+    adb_config_error: str | None = None  # refused ADB_SERVER_SOCKET / ANDROID_ADB_SERVER_PORT
+    artifacts_root: str = ""  # validated NERVE_ARTIFACTS_ROOT; "" → unset
+    artifacts_root_error: str | None = None  # engagement / artifacts-root misconfiguration
+    fleet_registry_state: str = ""  # "loaded" | "absent" | "unreadable"; "" → unprobed
+    fleet_registry_path: str = ""
+    fleet_registry_error: str | None = None
+    fleet_engagement_id: str | None = None
+    fleet_engagement_error: str | None = None
+    fleet_refused_count: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -119,8 +136,16 @@ def check_adb(
     is_executable: bool,
     devices_output: str | None,
     server_listening: bool = True,
+    config_error: str | None = None,
 ) -> CheckResult:
     """adb binary present + server responsive."""
+    if config_error is not None:
+        return CheckResult(
+            name="adb",
+            status="fail",
+            detail=config_error,
+            hint="unset or point it at 127.0.0.1/localhost",
+        )
     if not is_executable:
         return CheckResult(
             name="adb",
@@ -139,9 +164,7 @@ def check_adb(
             hint="Run: adb start-server (or `nerve doctor --fix`)",
         )
     suffix = "" if server_listening else " (server started for the check and stopped)"
-    return CheckResult(
-        name="adb", status="ok", detail=f"adb responsive ({adb_path}){suffix}"
-    )
+    return CheckResult(name="adb", status="ok", detail=f"adb responsive ({adb_path}){suffix}")
 
 
 def check_device_auth(devices_output: str | None) -> CheckResult:
@@ -153,9 +176,7 @@ def check_device_auth(devices_output: str | None) -> CheckResult:
             detail="skipped — adb server unresponsive",
         )
     unauthorized = [
-        line.split("\t", 1)[0]
-        for line in devices_output.splitlines()
-        if "\tunauthorized" in line
+        line.split("\t", 1)[0] for line in devices_output.splitlines() if "\tunauthorized" in line
     ]
     if unauthorized:
         return CheckResult(
@@ -179,13 +200,23 @@ def check_scrcpy_server(exists: bool, expected_path: str) -> CheckResult:
     return CheckResult(name="scrcpy-server", status="ok", detail=expected_path)
 
 
-def check_wda_project(project_dir: str, checkout_exists: bool) -> CheckResult:
+def check_wda_project(
+    project_dir: str, checkout_exists: bool, daemon_configured: bool | None = None
+) -> CheckResult:
     """WDA_PROJECT_DIR set and pointing at a real WebDriverAgent checkout.
 
-    Unset is a warn (Android-only users never need WDA); set-but-missing is a
-    fail — the user asked for iOS and pointed at nothing.
+    Unset is a warn (Android-only users never need WDA), unless the running
+    daemon already has it configured; set-but-missing is a fail — the user
+    asked for iOS and pointed at nothing. ``daemon_configured`` is ``None``
+    when there is no daemon reading; only the literal ``True`` counts.
     """
     if not project_dir:
+        if daemon_configured is True:
+            return CheckResult(
+                name="wda-project",
+                status="ok",
+                detail="configured in running daemon",
+            )
         return CheckResult(
             name="wda-project",
             status="warn",
@@ -208,9 +239,19 @@ def check_wda_project(project_dir: str, checkout_exists: bool) -> CheckResult:
     return CheckResult(name="wda-project", status="ok", detail=project_dir)
 
 
-def check_wda_team_id(team_id: str) -> CheckResult:
-    """WDA_TEAM_ID — only needed for physical iOS devices, so a warn, not a fail."""
+def check_wda_team_id(team_id: str, daemon_configured: bool | None = None) -> CheckResult:
+    """WDA_TEAM_ID — only needed for physical iOS devices, so a warn, not a fail.
+
+    ``daemon_configured`` is ``None`` when there is no daemon reading; only the
+    literal ``True`` (the running daemon has it set) turns an unset local value ok.
+    """
     if not team_id:
+        if daemon_configured is True:
+            return CheckResult(
+                name="wda-team-id",
+                status="ok",
+                detail="configured in running daemon",
+            )
         return CheckResult(
             name="wda-team-id",
             status="warn",
@@ -223,9 +264,7 @@ def check_wda_team_id(team_id: str) -> CheckResult:
 def check_xcode_clt(is_macos: bool, clt_path: str | None) -> CheckResult:
     """Xcode Command Line Tools present (macOS only)."""
     if not is_macos:
-        return CheckResult(
-            name="xcode-clt", status="skip", detail="skipped — not macOS"
-        )
+        return CheckResult(name="xcode-clt", status="skip", detail="skipped — not macOS")
     if not clt_path:
         return CheckResult(
             name="xcode-clt",
@@ -236,9 +275,7 @@ def check_xcode_clt(is_macos: bool, clt_path: str | None) -> CheckResult:
     return CheckResult(name="xcode-clt", status="ok", detail=clt_path)
 
 
-def check_daemon(
-    health: dict[str, Any] | None, installed_version: str, port: int
-) -> CheckResult:
+def check_daemon(health: dict[str, Any] | None, installed_version: str, port: int) -> CheckResult:
     """Daemon reachable on :port AND serving the installed package version.
 
     A version mismatch means a long-lived daemon is serving stale pre-merge
@@ -254,10 +291,7 @@ def check_daemon(
                 f"no nerve daemon on 127.0.0.1:{port} — CLI calls run in-process "
                 "(the daemon is optional)"
             ),
-            hint=(
-                f"Start it: uv run nerve daemon --port {port} "
-                f"(or launchctl kickstart -k gui/$UID/{DAEMON_LABEL})"
-            ),
+            hint=f"Start it: nerve daemon --port {port}",
         )
     served = str(health.get("package_version", "unknown"))
     if served == "unknown" or installed_version == "unknown":
@@ -274,13 +308,35 @@ def check_daemon(
         return CheckResult(
             name="daemon",
             status="fail",
-            detail=(
-                f"stale daemon: serving {served}, installed {installed_version}"
-            ),
-            hint=f"launchctl kickstart -k gui/$UID/{DAEMON_LABEL}",
+            detail=(f"stale daemon: serving {served}, installed {installed_version}"),
+            hint="Restart the daemon: it serves the code it was started with",
         )
     return CheckResult(
         name="daemon", status="ok", detail=f"reachable on :{port}, version {served}"
+    )
+
+
+def check_adb_local_network(
+    health: dict[str, Any] | None, is_macos: bool = True
+) -> CheckResult | None:
+    """Fail when daemon /health reports wifi-adb serials blocked by Local Network denial."""
+    if not isinstance(health, dict):
+        return None
+    adb_block = health.get("adb")
+    denied = adb_block.get("local_network_denied") if isinstance(adb_block, dict) else None
+    if not denied:
+        return None
+    serials = ", ".join(str(s) for s in denied)
+    access_label = "macOS Local Network access" if is_macos else "Local Network access"
+    return CheckResult(
+        name="adb_local_network",
+        status="fail",
+        detail=f"adb local_network_denied for: {serials}",
+        hint=(
+            f"the adb server was started without {access_label} "
+            "(e.g. by a launchd job); restart it from a GUI terminal: "
+            "adb kill-server && adb start-server"
+        ),
     )
 
 
@@ -306,23 +362,127 @@ def check_linc_layout(
     return CheckResult(name="linc-layout", status="ok", detail=f"{home} layout sane")
 
 
+def check_artifacts_root(root: str, error: str | None) -> CheckResult | None:
+    """NERVE_ARTIFACTS_ROOT / NERVE_ENGAGEMENT valid. None when neither is set.
+
+    A misconfiguration is one failed check — every artifact-writing tool
+    refuses with ``engagement_misconfigured`` until it is fixed.
+    """
+    if error is not None:
+        return CheckResult(
+            name="artifacts-root",
+            status="fail",
+            detail=error,
+            hint=(
+                "set NERVE_ARTIFACTS_ROOT to an existing, writable directory spelled by its "
+                "resolved path (no symlinks), or unset NERVE_ENGAGEMENT"
+            ),
+        )
+    if not root:
+        return None
+    return CheckResult(name="artifacts-root", status="ok", detail=f"artifacts confined to {root}")
+
+
+def check_device_fleet(
+    registry_state: str,
+    registry_path: str,
+    registry_error: str | None,
+    engagement_id: str | None,
+    engagement_error: str | None,
+    refused_count: int,
+) -> CheckResult | None:
+    """Report device-fleet.yaml state, engagement mode, and refused device count."""
+    if not registry_state:
+        return None
+    eng_label = (
+        "misconfigured"
+        if engagement_error is not None
+        else (f"on ({engagement_id})" if engagement_id is not None else "off")
+    )
+    detail = (
+        f"registry {registry_state} ({registry_path}); "
+        f"engagement={eng_label}; refused={refused_count}"
+    )
+    if engagement_error is not None:
+        return CheckResult(
+            name="device-fleet",
+            status="fail",
+            detail=f"{detail}: {engagement_error}",
+            hint="Set a valid NERVE_ENGAGEMENT id or clear it.",
+        )
+    if engagement_id is not None:
+        if registry_state == "loaded":
+            return CheckResult(name="device-fleet", status="ok", detail=detail)
+        suffix = f" ({registry_error})" if registry_error else ""
+        return CheckResult(
+            name="device-fleet",
+            status="fail",
+            detail=f"{detail}{suffix}",
+            hint=f"Fix or populate {registry_path} with cleared devices for engagement mode.",
+        )
+    if registry_state == "loaded":
+        return CheckResult(name="device-fleet", status="ok", detail=detail)
+    if registry_state == "absent":
+        return CheckResult(
+            name="device-fleet",
+            status="warn",
+            detail=detail,
+            hint=f"Create {registry_path} listing personal devices with personal: true.",
+        )
+    suffix = f" ({registry_error})" if registry_error else ""
+    return CheckResult(
+        name="device-fleet",
+        status="warn",
+        detail=f"{detail}{suffix}",
+        hint=f"Fix malformed YAML or permissions at {registry_path}.",
+    )
+
+
 def run_checks(probes: ProbeReport) -> list[CheckResult]:
     """Run every diagnostic check over the gathered probes. Pure."""
-    return [
+    wda_health = (
+        probes.daemon_health.get("wda") if isinstance(probes.daemon_health, dict) else None
+    )
+    daemon_wda_project = (
+        isinstance(wda_health, dict) and wda_health.get("project_configured") is True
+    )
+    daemon_wda_team_id = (
+        isinstance(wda_health, dict) and wda_health.get("team_id_configured") is True
+    )
+    results = [
         check_adb(
             probes.adb_path,
             probes.adb_is_executable,
             probes.adb_devices_output,
             probes.adb_server_listening,
+            probes.adb_config_error,
         ),
         check_device_auth(probes.adb_devices_output),
         check_scrcpy_server(probes.scrcpy_server_exists, probes.scrcpy_server_path),
-        check_wda_project(probes.wda_project_dir, probes.wda_checkout_exists),
-        check_wda_team_id(probes.wda_team_id),
+        check_wda_project(
+            probes.wda_project_dir,
+            probes.wda_checkout_exists,
+            daemon_configured=daemon_wda_project,
+        ),
+        check_wda_team_id(probes.wda_team_id, daemon_configured=daemon_wda_team_id),
         check_xcode_clt(probes.is_macos, probes.xcode_clt_path),
         check_daemon(probes.daemon_health, probes.installed_version, probes.daemon_port),
         check_linc_layout(probes.linc_home_exists, probes.missing_linc_dirs, probes.linc_home),
     ]
+    optional = (
+        check_artifacts_root(probes.artifacts_root, probes.artifacts_root_error),
+        check_device_fleet(
+            probes.fleet_registry_state,
+            probes.fleet_registry_path,
+            probes.fleet_registry_error,
+            probes.fleet_engagement_id,
+            probes.fleet_engagement_error,
+            probes.fleet_refused_count,
+        ),
+        check_adb_local_network(probes.daemon_health, probes.is_macos),
+    )
+    results.extend(check for check in optional if check is not None)
+    return results
 
 
 def overall_ok(results: list[CheckResult]) -> bool:
@@ -349,7 +509,10 @@ def plan_fixes(
     by_name = {r.name: r for r in results}
 
     layout = by_name.get("linc-layout")
-    if layout is not None and layout.status != "ok":
+    root_check = by_name.get("artifacts-root")
+    root_failed = root_check is not None and root_check.status == "fail"
+    # Never mkdir anything while the artifacts root is misconfigured: fail closed.
+    if layout is not None and layout.status != "ok" and not root_failed:
         dirs = linc_dirs or required_linc_dirs()
         fixes.append(
             FixAction(
@@ -376,6 +539,8 @@ def _execute_fix(fix: FixAction) -> None:
         for d in fix.args:
             Path(d).expanduser().mkdir(parents=True, exist_ok=True)
     elif fix.kind == "adb-start-server":
+        if adb_server_config_error() is not None:
+            return
         subprocess.run([ADB_PATH, "start-server"], check=False, timeout=15)
 
 
@@ -490,6 +655,8 @@ def _run_adb_probe(
     Returns ``(server_left_running, devices_stdout)``; the flag is False only
     when doctor stopped a server it started.
     """
+    if adb_server_config_error() is not None:
+        return True, None
     probe = _probe_adb_listening(listening_probe)
     if not adb_executable:
         return True, None
@@ -502,9 +669,7 @@ def _run_adb_probe(
 
 def _probe_xcode_clt() -> str | None:
     try:
-        proc = subprocess.run(
-            ["xcode-select", "-p"], capture_output=True, text=True, timeout=5
-        )
+        proc = subprocess.run(["xcode-select", "-p"], capture_output=True, text=True, timeout=5)
     except Exception:
         return None
     path = proc.stdout.strip()
@@ -519,10 +684,13 @@ def _probe_daemon_health(port: int) -> dict[str, Any] | None:
     """
     import urllib.request
 
+    # An empty ProxyHandler: HTTP_PROXY/ALL_PROXY must never answer for the local daemon
+    # (a proxy could report a healthy daemon that is not running).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
         # B310: scheme and host are hardcoded (http://127.0.0.1); only the
         # int-typed port varies — no user-controlled URL can reach this.
-        with urllib.request.urlopen(  # nosec B310
+        with opener.open(  # nosec B310
             f"http://127.0.0.1:{port}/health", timeout=2.0
         ) as resp:
             if resp.status != 200:
@@ -542,6 +710,138 @@ def _probe_installed_version() -> str:
         return "unknown"
 
 
+_FLEET_PROBE_BUDGET_S = 15.0
+_MAX_FLEET_PROBE_WORKERS = 16
+
+
+def _parse_online_adb_serials(adb_output: str | None) -> list[str]:
+    """Extract online device serials from already-probed ``adb devices`` output."""
+    return list(parse_adb_devices(adb_output)) if adb_output else []
+
+
+def _probe_ios_serials() -> list[str]:
+    """Online iOS simulator / device identifiers via the iOS discovery path."""
+    from linc_nerve.core.ios import IOSController
+
+    try:
+        devices = IOSController().discover()
+    except Exception:
+        return []
+    return [d.serial for d in devices if d.state == "online"]
+
+
+def _probe_network_serials_bounded(
+    serials: Sequence[str],
+    resolve_fn: Callable[[str], Any],
+    *,
+    budget_s: float | None = None,
+    max_workers: int = _MAX_FLEET_PROBE_WORKERS,
+) -> int:
+    """Resolve network *serials* concurrently within *budget_s*; incomplete items fail closed."""
+    if not serials:
+        return 0
+    effective_budget = _FLEET_PROBE_BUDGET_S if budget_s is None else budget_s
+    work_q: queue.Queue[str] = queue.Queue()
+    out_q: queue.Queue[bool] = queue.Queue()
+    for serial in serials:
+        work_q.put(serial)
+    worker_count = min(len(serials), max_workers)
+
+    def _worker() -> None:
+        while True:
+            try:
+                item = work_q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                refused = resolve_fn(item).reason is not None
+            except Exception:
+                refused = True
+            out_q.put(refused)
+
+    for _ in range(worker_count):
+        threading.Thread(target=_worker, daemon=True, name="nerve-doctor-fleet").start()
+
+    deadline = time.monotonic() + max(0.0, effective_budget)
+    completed = 0
+    refused_count = 0
+    total = len(serials)
+    while completed < total:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            refused_count += 1 if out_q.get(timeout=remaining) else 0
+            completed += 1
+        except queue.Empty:
+            break
+    while not work_q.empty():
+        with contextlib.suppress(queue.Empty):
+            work_q.get_nowait()
+    while completed < total and not out_q.empty():
+        with contextlib.suppress(queue.Empty):
+            refused_count += 1 if out_q.get_nowait() else 0
+            completed += 1
+    return refused_count + (total - completed)
+
+
+def _probe_device_fleet(
+    adb_output: str | None,
+    xcode_clt_path: str | None,
+) -> tuple[str, str, str | None, str | None, str | None, int]:
+    """Probe fleet registry state, engagement state, and refused device count.
+
+    Counts refused adb AND iOS devices. With engagement off and no loaded
+    registry nothing can be refused, so no device probe is spent; the iOS probe
+    runs only when the Xcode command line tools are present.
+    """
+    from linc_nerve.core import engagement
+    from linc_nerve.core.android_identity import is_network_transport
+
+    reg = engagement.load_fleet_registry()
+    eng_id: str | None = None
+    eng_error: str | None = None
+    try:
+        eng_id = engagement.engagement_id()
+    except engagement.EngagementMisconfiguredError as exc:
+        eng_error = str(exc)
+    if eng_id is None and eng_error is None and reg.state == "absent":
+        return reg.state, str(reg.path), reg.error, eng_id, eng_error, 0
+    if eng_id is None and eng_error is None and reg.state == "unreadable":
+        refused = sum(
+            1 for serial in _parse_online_adb_serials(adb_output) if is_network_transport(serial)
+        )
+        return reg.state, str(reg.path), reg.error, eng_id, eng_error, refused
+    serials = _parse_online_adb_serials(adb_output)
+    if xcode_clt_path:
+        serials.extend(_probe_ios_serials())
+    network_serials = [s for s in serials if is_network_transport(s)]
+    other_serials = [s for s in serials if not is_network_transport(s)]
+    refused = _probe_network_serials_bounded(network_serials, engagement.resolve_device_decision)
+    refused += sum(
+        1
+        for serial in other_serials
+        if engagement.resolve_device_decision(serial).reason is not None
+    )
+    state = "degraded" if reg.degraded else reg.state
+    return state, str(reg.path), reg.error, eng_id, eng_error, refused
+
+
+def _probe_artifacts_root() -> tuple[str, str | None, tuple[str, ...]]:
+    """Return (root, error, layout dirs) without raising on a bad engagement config.
+
+    On misconfiguration no layout directories are reported, so ``--fix`` never
+    plans a mkdir outside the (unusable) root.
+    """
+    from linc_nerve.core import engagement
+
+    try:
+        root = engagement.artifacts_root()
+    except engagement.EngagementMisconfiguredError as exc:
+        return "", str(exc), ()
+    return ("" if root is None else str(root)), None, required_linc_dirs()
+
+
 def gather_probes(
     port: int | None = None,
     *,
@@ -557,21 +857,27 @@ def gather_probes(
     adb_executable = shutil.which(ADB_PATH) is not None or (
         os.path.isabs(ADB_PATH) and os.access(ADB_PATH, os.X_OK)
     )
-    adb_listening, devices_output = _run_adb_probe(
-        ADB_PATH, adb_executable, listening_probe
-    )
+    adb_listening, devices_output = _run_adb_probe(ADB_PATH, adb_executable, listening_probe)
 
     scrcpy_path = scrcpy._SERVER_DIR / scrcpy._SERVER_FILENAME
 
     wda_project_dir = os.environ.get("WDA_PROJECT_DIR", "")
-    wda_checkout_exists = bool(
-        wda_project_dir and Path(wda_project_dir).expanduser().is_dir()
-    )
+    wda_checkout_exists = bool(wda_project_dir and Path(wda_project_dir).expanduser().is_dir())
 
     is_macos = platform.system() == "Darwin"
+    xcode_clt_path = _probe_xcode_clt() if is_macos else None
 
     home = linc_home()
-    missing_dirs = tuple(d for d in required_linc_dirs() if not Path(d).is_dir())
+    root, root_error, layout_dirs = _probe_artifacts_root()
+    missing_dirs = tuple(d for d in layout_dirs if not Path(d).is_dir())
+    (
+        fleet_state,
+        fleet_path,
+        fleet_error,
+        fleet_eng_id,
+        fleet_eng_error,
+        fleet_refused,
+    ) = _probe_device_fleet(devices_output, xcode_clt_path)
 
     return ProbeReport(
         adb_path=ADB_PATH,
@@ -583,7 +889,7 @@ def gather_probes(
         wda_checkout_exists=wda_checkout_exists,
         wda_team_id=os.environ.get("WDA_TEAM_ID", ""),
         is_macos=is_macos,
-        xcode_clt_path=_probe_xcode_clt() if is_macos else None,
+        xcode_clt_path=xcode_clt_path,
         daemon_health=_probe_daemon_health(port),
         installed_version=_probe_installed_version(),
         daemon_port=port,
@@ -591,6 +897,15 @@ def gather_probes(
         missing_linc_dirs=missing_dirs,
         linc_home=str(home),
         adb_server_listening=adb_listening,
+        adb_config_error=adb_server_config_error(),
+        artifacts_root=root,
+        artifacts_root_error=root_error,
+        fleet_registry_state=fleet_state,
+        fleet_registry_path=fleet_path,
+        fleet_registry_error=fleet_error,
+        fleet_engagement_id=fleet_eng_id,
+        fleet_engagement_error=fleet_eng_error,
+        fleet_refused_count=fleet_refused,
     )
 
 

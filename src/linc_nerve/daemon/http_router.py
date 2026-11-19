@@ -29,7 +29,7 @@ log = structlog.get_logger().bind(domain="http_router")
 
 _DAEMON_START_TIME = time.monotonic()
 
-# --- Adversarial-input hardening (linc-nerve#128, repaired per #129 round 0)
+# --- Adversarial-input hardening
 #
 # `route_request` is the daemon's primary HTTP-reachable dispatch point
 # (the log-stream routes reach a device without going through it — see
@@ -95,7 +95,7 @@ _TRAVERSAL_PARAM_NAMES = frozenset(
 # round-0 repair used a DENYLIST (`_SHELL_METACHAR_PATTERN =
 # re.compile(r"[;&|`$()\n\r]")`) that missed `>`, `<`, `*`, quotes, and
 # space — `nerve_kill(package="com.x > /sdcard/pwn")` contains no denylisted
-# character at all and reached the tool at 200 (linc-nerve#128/129 round 1
+# character at all and reached the tool at 200 (round 1
 # finding 2). Denylists enumerate known-bad characters; an allowlist
 # enumerates the one known-good shape and rejects everything else, which is
 # the correct direction for a field with a fixed, well-known grammar.
@@ -147,7 +147,7 @@ _TRAVERSAL_PARAM_NAMES = frozenset(
 _ROUTER_IDENTIFIER_RE = re.compile(r"\A[A-Za-z][A-Za-z0-9_.-]*\Z")
 _SHELL_GUARDED_PARAM_NAMES = frozenset({"package"})
 
-# Log-filter field validation (linc-nerve#128/129 round 1 finding 3):
+# Log-filter field validation (round 1 finding 3):
 # `filter`/`filter_str` used to be in NEITHER `_TRAVERSAL_PARAM_NAMES` nor
 # `_SHELL_GUARDED_PARAM_NAMES`, so `_reject_via_stream_guards` inspected it
 # with no guard at all — it flowed straight through to
@@ -433,6 +433,10 @@ def _build_health() -> dict[str, Any]:
         "git_sha": _SERVED_GIT_SHA,
         "package_version": _SERVED_PACKAGE_VERSION,
         "adb": adb_block,
+        "wda": {
+            "project_configured": bool(os.environ.get("WDA_PROJECT_DIR", "").strip()),
+            "team_id_configured": bool(os.environ.get("WDA_TEAM_ID", "").strip()),
+        },
     }
 
 
@@ -455,6 +459,7 @@ def _build_devices() -> dict[str, Any]:
         if now - ts < _DEVICES_CACHE_TTL:
             return {**cached, "cache_age_seconds": round(now - ts, 2)}
 
+    from linc_nerve.core import engagement
     from linc_nerve.core.android import AndroidController
     from linc_nerve.core.ios import IOSController
     from linc_nerve.mcp._core import _ensure_initialized
@@ -468,12 +473,14 @@ def _build_devices() -> dict[str, Any]:
             ctrl = ctrl_cls()
             devs = ctrl.discover()
             platform_counts[platform] = len(devs)
-            for d in devs:
-                # Use the canonical NerveDevice serializer so this stays in
-                # sync with the MCP discovery path. A hand-built dict here
-                # previously dropped `state`, silently disabling crucible's
-                # online filter over HTTP (improvement d07eef8f).
-                devices.append(d.to_dict())
+            # Use the canonical NerveDevice serializer + fleet policy annotation so
+            # this stays in sync with the MCP discovery path.
+            failed = getattr(ctrl, "_last_discover_failed_serials", None)
+            devices.extend(
+                engagement.annotate_discovered_devices(
+                    devs, failed_serials=failed, controller=ctrl
+                )
+            )
         except Exception as exc:
             # A swallowed discovery failure used to be indistinguishable from a
             # genuinely empty fleet: during the #131 outage `android: 0` was
@@ -607,7 +614,7 @@ def _check_reservation_conflict(tool_name: str, body: dict[str, Any]) -> dict[st
     return {"status": 409, "body": {"error": conflict}}
 
 
-# Ordered pre-dispatch guards (linc-nerve#128) — reject hostile/malformed
+# Ordered pre-dispatch guards — reject hostile/malformed
 # requests before any tool code or device I/O runs. Shared by both HTTP
 # entry points that reach a tool/device: POST /tools/* (via route_request)
 # AND GET /stream + GET /tools/nerve_logcat_stream (via sse_server calling
@@ -644,6 +651,14 @@ def _run_pre_dispatch_guards(tool_name: str, body: dict[str, Any]) -> dict[str, 
 # client-input family, then anything else falls through to 500.
 def _error_status_and_body(tool_name: str, exc: Exception) -> tuple[int, dict[str, Any]]:
     """Map a dispatch-time exception to an HTTP status + JSON body."""
+    from linc_nerve.core.engagement import (
+        EngagementMisconfiguredError,
+        PersonalDeviceError,
+        refusal_payload,
+    )
+
+    if isinstance(exc, (EngagementMisconfiguredError, PersonalDeviceError)):
+        return 400, refusal_payload(exc)
     if isinstance(exc, TypeError):
         return 400, {"error": f"Invalid parameters: {exc}"}
     if isinstance(exc, (ValueError, KeyError, LookupError)):
@@ -773,6 +788,20 @@ def _coerce_typed_params(fn: Callable[..., Any], body: dict[str, Any]) -> dict[s
     return None
 
 
+def _safe_log_mcp_call(
+    tool_name: str,
+    params: dict[str, Any],
+    duration_ms: float,
+    success: bool,
+    error_msg: str | None = None,
+) -> None:
+    """Write a usage-log entry without failing or changing the HTTP tool response."""
+    try:
+        log_mcp_call("linc-nerve", tool_name, params, duration_ms, success, error_msg)
+    except OSError as exc:
+        log.warning("mcp_call_log_failed", tool=tool_name, error=str(exc))
+
+
 def _reject_bad_param_types(
     tool_name: str, body: dict[str, Any], fn: Callable[..., Any], t0: float
 ) -> dict[str, Any] | None:
@@ -782,9 +811,7 @@ def _reject_bad_param_types(
         error = rejection["body"]["error"]
         log.warning("tool_call_rejected_bad_type", tool=tool_name, error=error)
         duration_ms = (time.monotonic() - t0) * 1000
-        log_mcp_call(
-            "linc-nerve", tool_name, _rejected_log_params(body), duration_ms, False, error
-        )
+        _safe_log_mcp_call(tool_name, _rejected_log_params(body), duration_ms, False, error)
     return rejection
 
 
@@ -816,11 +843,11 @@ def _dispatch_tool(
     try:
         result = _strip_inline_sentinel(registry[tool_name](**body))
         duration_ms = (time.monotonic() - t0) * 1000
-        log_mcp_call("linc-nerve", tool_name, body, duration_ms, True)
+        _safe_log_mcp_call(tool_name, body, duration_ms, True)
         return {"status": 200, "body": {"result": result}}
     except Exception as e:
         duration_ms = (time.monotonic() - t0) * 1000
-        log_mcp_call("linc-nerve", tool_name, body, duration_ms, False, str(e))
+        _safe_log_mcp_call(tool_name, body, duration_ms, False, str(e))
         status, error_body = _error_status_and_body(tool_name, e)
         return {"status": status, "body": error_body}
 
@@ -849,6 +876,11 @@ def route_request(
         return {"status": 200, "body": _build_devices()}
 
     if path.startswith("/tools/") and method == "POST":
+        if not isinstance(body, dict):
+            return {
+                "status": 400,
+                "body": {"error": "JSON body must be an object"},
+            }
         tool_name = path[len("/tools/") :]
         if tool_name not in registry:
             return {

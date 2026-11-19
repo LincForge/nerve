@@ -336,8 +336,12 @@ class TestRenewAnonymous:
         mgr = self._stopped_mgr(tmp_path, renew_anonymous=False)
         try:
             assert isinstance(
-                mgr.reserve("D1", timeout_seconds=60, owner_pid=dead_pid), DeviceReservation
+                mgr.reserve("D1", timeout_seconds=60, owner_pid=os.getpid()), DeviceReservation
             )
+            mgr._conn.execute(
+                "UPDATE reservations SET owner_pid = ? WHERE device_serial = ?", (dead_pid, "D1")
+            )
+            mgr._conn.commit()
             self._tick_and_reap(mgr, "D1")
             assert mgr.check("D1") is None
         finally:

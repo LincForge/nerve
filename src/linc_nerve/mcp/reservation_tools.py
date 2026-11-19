@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from pydantic import Field
 
 from linc_nerve.core.contracts import require
-from linc_nerve.core.device_manager import _held_by, _resolve_owner
+from linc_nerve.core.device_manager import _held_by, _resolve_owner, validate_reserve_args
 from linc_nerve.core.procs import pid_alive
 from linc_nerve.mcp import _core
 from linc_nerve.mcp._core import device_tool
@@ -99,6 +99,14 @@ def _reserve_result(
     return out
 
 
+def _preflight_reserve(device: str, timeout_seconds: Any, owner_pid: Any) -> dict[str, Any] | None:
+    """Validate reserve bounds before checking engagement policy or touching SQLite."""
+    err = validate_reserve_args(timeout_seconds, owner_pid)
+    if err is not None:
+        return {"error": err, "validation_error": True}
+    return _core._device_policy_refusal(device, allow_discover=True)
+
+
 @device_tool
 def _nerve_reserve_sync(
     device: str,
@@ -137,6 +145,10 @@ def _nerve_reserve_sync(
             reaped when this process exits. Without owner, the lease is
             owned by pid:<owner_pid> (release with that owner).
     """
+    refusal = _preflight_reserve(device, timeout_seconds, owner_pid)
+    if refusal is not None:
+        return refusal
+
     _core._ensure_initialized()
     device_mgr = require(_core._device_mgr, "device manager")
 

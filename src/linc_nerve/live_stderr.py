@@ -4,7 +4,7 @@
 ``sys.stderr`` at configure time, and a logger bound at import time keeps it for the
 life of the process. When something later replaces or closes that object (pytest's
 capture between sessions, a stdio test, mutmut's second in-process pytest run), every
-log call raises ``ValueError: I/O operation on closed file`` (linc-ops#1121).
+log call raises ``ValueError: I/O operation on closed file``.
 
 Imports nothing from ``linc_nerve`` so it can run before any module binds a logger.
 """

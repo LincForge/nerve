@@ -33,10 +33,8 @@ def _ctrl(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[FakeContr
 
 def _mcp_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     srv = _registry_server()
-    blocks = anyio.run(srv.call_tool, tool_name, arguments)
-    if isinstance(blocks, tuple):
-        blocks = blocks[0]
-    return json.loads(blocks[0].text)
+    result = anyio.run(srv.call_tool, tool_name, arguments)
+    return json.loads(result.content[0].text)
 
 
 # ---------------------------------------------------------------------------

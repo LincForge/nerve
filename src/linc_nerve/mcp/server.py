@@ -12,8 +12,6 @@ import sys
 import types
 from typing import IO, Any
 
-from linc_nerve.core.observability import linc_home
-
 _THREAD_DUMP_ENV = "NERVE_THREAD_DUMP"
 
 
@@ -26,10 +24,14 @@ def _thread_dump_file() -> IO[str]:
     """
     if not os.getenv(_THREAD_DUMP_ENV):
         return sys.stderr
-    path = linc_home() / "nerve" / "nerve_threads.txt"
+    from linc_nerve.core import engagement
+
+    path = engagement.thread_dump_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    return os.fdopen(os.open(path, flags, 0o600), "w")
+    fd = os.open(path, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    return os.fdopen(fd, "w")
 
 
 # Dump all thread tracebacks on SIGUSR1: ``kill -USR1 <pid>`` → _thread_dump_file()
@@ -170,6 +172,13 @@ _DELEGATED_TO_CORE = {
 }
 
 
+def _on_delegated_setattr(name: str) -> None:
+    if name == "_android":
+        from linc_nerve.core import engagement
+
+        engagement.clear_hardware_serial_cache()
+
+
 class _DelegatingModule(types.ModuleType):
     """Module subclass that delegates singleton access to _core."""
 
@@ -181,6 +190,7 @@ class _DelegatingModule(types.ModuleType):
     def __setattr__(self, name: str, value: Any) -> None:
         if name in _DELEGATED_TO_CORE:
             setattr(_core, name, value)
+            _on_delegated_setattr(name)
         else:
             super().__setattr__(name, value)
 

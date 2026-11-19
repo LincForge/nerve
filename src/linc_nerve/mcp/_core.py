@@ -8,21 +8,23 @@ import inspect
 import io
 import os
 import queue
-import tempfile
 import threading
 import time
 from collections.abc import Iterable, Mapping
 from functools import partial, wraps
+from importlib.metadata import version as _dist_version
+from pathlib import Path
 from typing import Any, BinaryIO
 
 import anyio
 import structlog
 from linc_cli_kit import strict_tools
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.mcpserver import Image
 from mcp.types import ToolAnnotations
 
-from linc_nerve.core import action_log
+from linc_nerve.core import action_log, engagement, grounding
 from linc_nerve.core import output_retention as _retention
+from linc_nerve.core import timeouts as _timeouts
 from linc_nerve.core.android import AndroidController
 from linc_nerve.core.contracts import require
 from linc_nerve.core.device import NerveDevice, Platform
@@ -34,10 +36,11 @@ from linc_nerve.core.observability import log_mcp_call
 from linc_nerve.core.state_engine import StateSessionManager
 from linc_nerve.mcp._confirm import DESTRUCTIVE_TOOLS
 from linc_nerve.mcp._docstring_args import described_signature
+from linc_nerve.mcp._mcpserver import NerveMCPServer
 
 log = structlog.get_logger().bind(domain="device_control")
 
-server = FastMCP("linc-nerve")
+server = NerveMCPServer("linc-nerve", version=_dist_version("linc-nerve"))
 strict_tools(server)
 
 # ---------------------------------------------------------------------------
@@ -111,7 +114,25 @@ _DEVICE_CALL_TIMEOUT = 90  # seconds
 # ---------------------------------------------------------------------------
 
 
-def _run_with_timeout(fn: Any, serial: str) -> Any:
+def _timeout_error_message(timeout_s: int | float, tool_name: str) -> str:
+    """Format the timeout error string for a listed or unlisted MCP tool."""
+    if tool_name in _timeouts.MCP_CEILING_S:
+        return (
+            f"{tool_name} did not finish within {timeout_s}s and may still be running "
+            "on the device; check its result before retrying."
+        )
+    return (
+        f"Operation timed out after {timeout_s}s. "
+        "Device may be unresponsive — try nerve_discover to check connectivity."
+    )
+
+
+def _run_with_timeout(
+    fn: Any,
+    serial: str,
+    timeout_s: int | float = _DEVICE_CALL_TIMEOUT,
+    tool_name: str = "",
+) -> Any:
     """Run *fn* in a daemon thread with a hard timeout.
 
     Unlike ``anyio.fail_after``, this does NOT depend on the async event loop
@@ -134,16 +155,15 @@ def _run_with_timeout(fn: Any, serial: str) -> Any:
     t.start()
 
     try:
-        status, value = result_q.get(timeout=_DEVICE_CALL_TIMEOUT)
+        status, value = result_q.get(timeout=timeout_s)
     except queue.Empty:
         log.error(
             "device_call_timeout",
             serial=serial,
-            timeout_s=_DEVICE_CALL_TIMEOUT,
+            timeout_s=timeout_s,
         )
         return {
-            "error": f"Operation timed out after {_DEVICE_CALL_TIMEOUT}s. "
-            "Device may be unresponsive — try nerve_discover to check connectivity.",
+            "error": _timeout_error_message(timeout_s, tool_name),
             "device": serial,
         }
 
@@ -152,7 +172,12 @@ def _run_with_timeout(fn: Any, serial: str) -> Any:
     raise value
 
 
-async def _run_on_device(serial: str, fn: Any) -> Any:
+async def _run_on_device(
+    serial: str,
+    fn: Any,
+    timeout_s: int | float = _DEVICE_CALL_TIMEOUT,
+    tool_name: str = "",
+) -> Any:
     """Run a blocking function with per-device serialization.
 
     Acquires a per-device semaphore (created on first use) so that only one
@@ -164,7 +189,9 @@ async def _run_on_device(serial: str, fn: Any) -> Any:
     if serial not in _device_semaphores:
         _device_semaphores[serial] = anyio.Semaphore(1)
     async with _device_semaphores[serial]:
-        return await anyio.to_thread.run_sync(partial(_run_with_timeout, fn, serial))
+        return await anyio.to_thread.run_sync(
+            partial(_run_with_timeout, fn, serial, timeout_s, tool_name)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +230,7 @@ def _register_tool(wrapper: Any, fn: Any, tool_name: str) -> None:
 
 # Sentinel key a @device_tool/@global_tool result dict can set to carry raw
 # image bytes that should be delivered as an inline MCP ImageContent block
-# alongside the rest of the (JSON-serialized) result — see linc-nerve#97.
+# alongside the rest of the (JSON-serialized) result.
 # Opt-in and generic: any tool can use it; tools that don't set it are
 # unaffected. Only applies at the MCP wire boundary — the underlying sync
 # function's direct dict return (as seen by tests and other in-process
@@ -321,8 +348,7 @@ def _apply_agent_image_budget(result: dict[str, Any], kwargs: dict[str, Any]) ->
                 shrank = True
             if shrank:
                 agent_path = path[: -len(".png")] + ".agent.png"
-                with open(agent_path, "wb") as f:
-                    f.write(rescaled_file)
+                engagement.write_private_bytes(agent_path, rescaled_file)
                 result["screenshot"] = agent_path
                 agent_bytes = rescaled_file
         except OSError:
@@ -518,7 +544,9 @@ def _app_refusal(
     refusal = action_log.package_refusal(guard, tool_name, call_args)
     if refusal is not None or not action_log.is_uri_launch(tool_name, call_args):
         return refusal
-    _, platform = _resolve_device(device)
+    dev, platform = _resolve_device(device)
+    if dev is None:
+        return action_log.refusal("other_package", platform, platform)
     return action_log.uri_launch_refusal(guard, platform)
 
 
@@ -585,15 +613,13 @@ def _call_with_action_log(
 _SWIPE_CANONICAL = ("start_x", "start_y", "end_x", "end_y")
 _SWIPE_ALIAS = ("x1", "y1", "x2", "y2")
 _ALIAS_TOOLS = frozenset({"nerve_key", "nerve_swipe", "nerve_tap"})
-_LAST_GROUNDED_TAP: dict[tuple[str, int, int], dict[str, Any]] = {}
+_LAST_GROUNDED_TAP: grounding.GroundedTapStore = grounding.GroundedTapStore()
 
 
 def _resolve_tap_prompt(
     device: str, prompt: str
 ) -> tuple[int, int, dict[str, Any]] | dict[str, Any]:
     """Resolve a semantic visual tap prompt to ``(x, y, meta)`` or an error dict."""
-    from linc_nerve.core import grounding
-
     dev, platform = _resolve_device(device)
     if dev is None:
         return {"error": platform}
@@ -613,6 +639,7 @@ def _resolve_tap_prompt(
         targets = grounding.ground_visual_targets(
             png_bytes, prompt, screen_size=screen_size, api_key=api_key
         )
+        screen_hash = grounding.screenshot_hash(png_bytes)
     except Exception as exc:
         return {"error": f"Visual grounding failed: {grounding.describe_error(exc)}"}
     top = grounding.select_tap_target(targets)
@@ -625,6 +652,7 @@ def _resolve_tap_prompt(
         "confidence": top.get("confidence", 0.0),
         "bounds": top.get("bounds", ""),
         "source": top.get("source", "sam-3.1"),
+        "_screen_hash": screen_hash,
     }
     return cx, cy, meta
 
@@ -645,10 +673,15 @@ def _canonical_tap_args(kwargs: dict[str, Any]) -> dict[str, Any]:
     device = str(kwargs.get("device") or "")
     resolved = _resolve_tap_prompt(device, prompt)
     if isinstance(resolved, dict):
+        err = {**resolved, "prompt": prompt}
         session = action_log.REGISTRY.active(device) if device else None
         if session is not None and session.guard is not None:
-            return {k: v for k, v in kwargs.items() if k != "prompt"}
-        return {**resolved, "prompt": prompt}
+            action_log.REGISTRY.record_guard(
+                device,
+                "nerve_tap",
+                action_log.unreadable_refusal(str(err["error"])),
+            )
+        return err
     cx, cy, meta = resolved
     _LAST_GROUNDED_TAP[(device, cx, cy)] = meta
     base = {k: v for k, v in kwargs.items() if k != "prompt"}
@@ -915,6 +948,77 @@ def _tag_auto_selected(
     return result
 
 
+# Lease-housekeeping tools that write no engagement artifacts. They stay usable
+# on a misconfigured engagement (e.g. the vault unmounted mid-session) so a
+# reservation is never stranded — but only once this process has initialised
+# its device manager, so a misconfigured fresh process never creates devices.db.
+_ENGAGEMENT_EXEMPT_TOOLS: frozenset[str] = frozenset({"nerve_release", "nerve_pool"})
+
+
+def _engagement_refusal(tool_name: str) -> dict[str, str] | None:
+    """Return the refusal dict when engagement config is invalid, else None."""
+    try:
+        engagement.artifacts_root()
+    except engagement.EngagementMisconfiguredError as exc:
+        if tool_name in _ENGAGEMENT_EXEMPT_TOOLS and _device_mgr is not None:
+            log.warning("engagement_misconfigured_exempt_tool", tool=tool_name, error=str(exc))
+            return None
+        return engagement.refusal_payload(exc)
+    return None
+
+
+def _with_engagement_guard(fn: Any, tool_name: str, *, hide_wrapped: bool = False) -> Any:
+    """Validate engagement/artifacts config and return refusal dict on misconfig."""
+
+    @wraps(fn)
+    def _guarded(*args: Any, **kwargs: Any) -> Any:
+        refusal = _engagement_refusal(tool_name)
+        if refusal is not None:
+            return refusal
+        _clear_last_policy_refusal()
+        try:
+            result = fn(*args, **kwargs)
+        except engagement.EngagementMisconfiguredError as exc:
+            return engagement.refusal_payload(exc)
+        except ValueError:
+            policy_ref = _consume_policy_refusal()
+            if policy_ref is not None and policy_ref.reason is not None:
+                return _decision_payload(policy_ref)
+            raise
+        finally:
+            pending_ref = _consume_policy_refusal()
+        if (
+            pending_ref is not None
+            and isinstance(result, dict)
+            and result.get("error")
+            and "error_category" not in result
+        ):
+            return {
+                **result,
+                "error_category": pending_ref.error_category or engagement.ERROR_CATEGORY,
+            }
+        return result
+
+    if hide_wrapped:
+        _guarded.__signature__ = inspect.signature(fn)  # type: ignore[attr-defined]
+        _guarded.__dict__.pop("__wrapped__", None)
+    return _guarded
+
+
+def _safe_log_mcp_call(
+    tool_name: str,
+    params: dict[str, Any],
+    duration_ms: float,
+    success: bool,
+    error_msg: str | None = None,
+) -> None:
+    """Append a usage-log entry, warning rather than failing or altering a tool's result."""
+    try:
+        log_mcp_call("linc-nerve", tool_name, params, duration_ms, success, error_msg)
+    except OSError as exc:
+        log.warning("mcp_call_log_failed", tool=tool_name, error=str(exc))
+
+
 def device_tool(fn: Any) -> Any:
     """Register a sync device function as an MCP tool.
 
@@ -926,23 +1030,39 @@ def device_tool(fn: Any) -> Any:
     and the daemon import and call it like the original.
     """
     tool_name = _record_tool(fn, "device")
+    timeout_s = _timeouts.mcp_ceiling(tool_name)
     sig = inspect.signature(fn)
     checked = _with_coordinate_check(fn, tool_name)
     logged = _with_canonical_input(_with_action_log(checked, tool_name), fn, tool_name)
+    guarded = _with_engagement_guard(
+        logged,
+        tool_name,
+        hide_wrapped=not hasattr(logged, "__wrapped__"),
+    )
 
     @wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        device, auto_selected, call_args, call_kwargs = _resolve_wrapper_device(
-            tool_name, sig, args, kwargs
-        )
         t0 = time.monotonic()
         error_msg = None
         validation_only = False
+        call_kwargs: dict[str, Any] = dict(kwargs)
         try:
+            refusal = _engagement_refusal(tool_name)
+            if refusal is not None:
+                error_msg = refusal["error"]
+                return refusal
+            device, auto_selected, call_args, call_kwargs = _resolve_wrapper_device(
+                tool_name, sig, args, kwargs
+            )
             result = (
                 device
                 if isinstance(device, dict)
-                else await _run_on_device(device, partial(logged, *call_args, **call_kwargs))
+                else await _run_on_device(
+                    device,
+                    partial(guarded, *call_args, **call_kwargs),
+                    timeout_s=timeout_s,
+                    tool_name=tool_name,
+                )
             )
             result = _tag_auto_selected(result, device, auto_selected)
             if isinstance(result, dict) and "error" in result:
@@ -964,10 +1084,10 @@ def device_tool(fn: Any) -> Any:
             success = error_msg is None or validation_only
             if _metrics is not None:
                 _metrics.record_tool_call(tool_name, success)
-            log_mcp_call("linc-nerve", tool_name, call_kwargs, duration_ms, success, error_msg)
+            _safe_log_mcp_call(tool_name, call_kwargs, duration_ms, success, error_msg)
 
     _register_tool(wrapper, fn, tool_name)
-    return logged
+    return guarded
 
 
 def global_tool(fn: Any) -> Any:
@@ -976,6 +1096,7 @@ def global_tool(fn: Any) -> Any:
     No device serial, no per-device semaphore — just thread dispatch.
     """
     tool_name = _record_tool(fn, "global")
+    guarded = _with_engagement_guard(fn, tool_name)
 
     @wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -983,7 +1104,7 @@ def global_tool(fn: Any) -> Any:
         error_msg = None
         validation_only = False
         try:
-            result = await anyio.to_thread.run_sync(partial(fn, *args, **kwargs))
+            result = await anyio.to_thread.run_sync(partial(guarded, *args, **kwargs))
             if isinstance(result, dict) and "error" in result:
                 error_msg = str(result["error"])
                 validation_only = bool(result.get("validation_error"))
@@ -996,10 +1117,10 @@ def global_tool(fn: Any) -> Any:
             success = error_msg is None or validation_only
             if _metrics is not None:
                 _metrics.record_tool_call(tool_name, success)
-            log_mcp_call("linc-nerve", tool_name, kwargs, duration_ms, success, error_msg)
+            _safe_log_mcp_call(tool_name, kwargs, duration_ms, success, error_msg)
 
     _register_tool(wrapper, fn, tool_name)
-    return fn
+    return guarded
 
 
 # ---------------------------------------------------------------------------
@@ -1030,7 +1151,11 @@ def _init_singletons() -> None:
     if _state_mgr is None:
         _state_mgr = StateSessionManager()
     if _device_mgr is None:
-        _device_mgr = DeviceManager(renew_anonymous=not _daemon_mode)
+        _device_mgr = DeviceManager(
+            renew_anonymous=not _daemon_mode,
+            controller_getter=_sync_hw_cache_controller,
+            probe_hw=_probe_android_hardware_serial,
+        )
     if _emulator is None:
         _emulator = EmulatorManager()
     atexit.register(_shutdown_cleanup)
@@ -1111,11 +1236,151 @@ def _invalidate_cache() -> None:
     with _cache_lock:
         _cache_timestamp = _INVALIDATED
         _stale_confirmed.clear()
+    engagement.clear_hardware_serial_cache()
 
 
 # ---------------------------------------------------------------------------
 # Device resolution helpers
 # ---------------------------------------------------------------------------
+
+
+_POLICY_REFUSAL_TLS = threading.local()
+_last_hw_cache_android_id: int | None = None
+
+
+def _sync_hw_cache_controller() -> Any:
+    """Clear the identity cache if ``_android`` changed and return ``_android``."""
+    global _last_hw_cache_android_id
+    if _android is not None:
+        cur_id = id(_android)
+        if _last_hw_cache_android_id is not None and _last_hw_cache_android_id != cur_id:
+            engagement.clear_hardware_serial_cache()
+        _last_hw_cache_android_id = cur_id
+    return _android
+
+
+def _ensure_android_for_policy(serial: str = "", device: object = None) -> Any:
+    """Lazy-init ``_android`` only when network identity probing is required."""
+    if _android is None and engagement.needs_network_identity_probe(serial, device):
+        _ensure_initialized()
+    return _sync_hw_cache_controller()
+
+
+def _probe_android_hardware_serial(serial: str) -> str:
+    """Resolve ``ro.serialno`` via the active MCP Android controller."""
+    if _android is None:
+        _ensure_initialized()
+    ctrl = _sync_hw_cache_controller()
+    if ctrl is None:
+        return ""
+    return engagement.probe_controller_hardware_serial(ctrl, serial)
+
+
+def _clear_last_policy_refusal() -> None:
+    _POLICY_REFUSAL_TLS.decision = None
+
+
+def _record_policy_refusal(decision: engagement.DeviceDecision) -> None:
+    _POLICY_REFUSAL_TLS.decision = decision
+
+
+def _consume_policy_refusal() -> engagement.DeviceDecision | None:
+    dec = getattr(_POLICY_REFUSAL_TLS, "decision", None)
+    _POLICY_REFUSAL_TLS.decision = None
+    return dec
+
+
+def _decision_payload(decision: engagement.DeviceDecision) -> dict[str, str]:
+    return {
+        "error": decision.reason or "Device refused by fleet policy.",
+        "error_category": decision.error_category or engagement.ERROR_CATEGORY,
+    }
+
+
+def _discovery_could_clear(
+    decision: engagement.DeviceDecision,
+    cached_dev: NerveDevice | None,
+) -> bool:
+    """True only when uncached discovery could match another identifier to personal: false."""
+    if cached_dev is not None or decision.allowed:
+        return False
+    if decision.error_category == engagement.PERSONAL_DEVICE_ERROR_CATEGORY:
+        return False
+    try:
+        if not engagement.is_engagement_on():
+            return False
+    except engagement.EngagementMisconfiguredError:
+        return False
+    return engagement.load_fleet_registry().state == "loaded"
+
+
+def _device_policy_refusal(
+    serial: str,
+    *,
+    allow_discover: bool = False,
+) -> dict[str, str] | None:
+    """Refuse *serial* per fleet/engagement policy before mutating or reserving."""
+    cached_dev = _find_serial(_cached_devices, serial)
+    ctrl = _ensure_android_for_policy(serial, cached_dev)
+    dec = engagement.resolve_device_decision(
+        serial, cached_dev, probe_hw=_probe_android_hardware_serial, controller=ctrl
+    )
+    if dec.reason is None:
+        return None
+    if allow_discover and _discovery_could_clear(dec, cached_dev) and (_android or _ios):
+        fresh_dev = _find_serial(_get_cached_devices(), serial) or _find_serial(
+            _refresh_cache(), serial
+        )
+        ctrl = _ensure_android_for_policy(serial, fresh_dev)
+        dec = engagement.resolve_device_decision(
+            serial, fresh_dev, probe_hw=_probe_android_hardware_serial, controller=ctrl
+        )
+        if dec.reason is None:
+            return None
+    return _decision_payload(dec)
+
+
+def _pre_resolve_refusal(serial: str) -> str | None:
+    cached_hint = _find_serial(_cached_devices, serial)
+    ctrl = _ensure_android_for_policy(serial, cached_hint)
+    pre = engagement.resolve_device_decision(
+        serial, cached_hint, probe_hw=_probe_android_hardware_serial, controller=ctrl
+    )
+    if pre.reason is not None and not _discovery_could_clear(pre, cached_hint):
+        _record_policy_refusal(pre)
+        return pre.reason
+    return None
+
+
+def _post_resolve_refusal(serial: str, dev: NerveDevice | None) -> str | None:
+    ctrl = _ensure_android_for_policy(serial, dev)
+    post = engagement.resolve_device_decision(
+        serial, dev, probe_hw=_probe_android_hardware_serial, controller=ctrl
+    )
+    if post.reason is not None:
+        _record_policy_refusal(post)
+        return post.reason
+    return None
+
+
+def _lookup_device(serial: str) -> NerveDevice | None:
+    _ensure_initialized()
+    return (
+        _stale_ready_android(serial)
+        or _find_serial(_get_cached_devices(), serial)
+        or _find_serial(_refresh_cache(), serial)
+    )
+
+
+def _finalize_resolved_device(
+    serial: str, dev: NerveDevice | None
+) -> tuple[NerveDevice | None, str]:
+    post_reason = _post_resolve_refusal(serial, dev)
+    if post_reason is not None:
+        return None, post_reason
+    if dev is None:
+        return None, f"Device '{serial}' not found. Run nerve_discover to list devices."
+    return dev, dev.platform.value
 
 
 def _resolve_device(serial: str) -> tuple[NerveDevice | None, str]:
@@ -1126,15 +1391,10 @@ def _resolve_device(serial: str) -> tuple[NerveDevice | None, str]:
     cache miss it forces a full refresh before giving up.
     Returns (device, platform_str) or (None, error_message).
     """
-    _ensure_initialized()
-    dev = (
-        _stale_ready_android(serial)
-        or _find_serial(_get_cached_devices(), serial)
-        or _find_serial(_refresh_cache(), serial)
-    )
-    if dev is None:
-        return None, f"Device '{serial}' not found. Run nerve_discover to list devices."
-    return dev, dev.platform.value
+    pre_reason = _pre_resolve_refusal(serial)
+    if pre_reason is not None:
+        return None, pre_reason
+    return _finalize_resolved_device(serial, _lookup_device(serial))
 
 
 def _find_serial(devices: list[NerveDevice], serial: str) -> NerveDevice | None:
@@ -1246,7 +1506,7 @@ def _next_output_path(serial: str, tool: str, ext: str = "png") -> str:
     Counter prevents collisions from rapid sequential calls.
     """
     global _file_counter
-    safe_serial = serial.replace("/", "_").replace(":", "_")
+    safe_serial = engagement.safe_serial(serial)
     out_dir = _output_dir()
     with _counter_lock:
         _file_counter += 1
@@ -1276,13 +1536,20 @@ def _output_dir() -> str:
     created and locked so later spills keep working. Only the first creation sweeps.
     """
     global _OUTPUT_DIR, _OUTPUT_LOCK
+    parent = engagement.output_parent()
     with _output_dir_lock:
-        if _output_dir_usable(_OUTPUT_DIR):
+        usable = _output_dir_usable(_OUTPUT_DIR)
+        if usable and (
+            parent is None
+            or engagement.is_within_root(Path(require(_OUTPUT_DIR, "output dir")), Path(parent))
+        ):
             return require(_OUTPUT_DIR, "output dir")
         first = _OUTPUT_DIR is None
+        switched_root = usable and parent is not None
         if _OUTPUT_LOCK is not None:
             _OUTPUT_LOCK.close()
-        _OUTPUT_DIR, _OUTPUT_LOCK = _retention.create_locked_output_dir()
-        if first and _retention.sweep_enabled(os.environ):
-            _sweep_stale_output_dirs(tempfile.gettempdir())
+        _OUTPUT_DIR, _OUTPUT_LOCK = _retention.create_locked_output_dir(tmp_root=parent)
+        sweep_root = engagement.output_sweep_root(parent)
+        if (first or switched_root) and _retention.sweep_enabled(os.environ):
+            _sweep_stale_output_dirs(sweep_root)
         return _OUTPUT_DIR

@@ -95,10 +95,27 @@ def test_same_owner_reserve_renews(tmp_path: Path) -> None:
         mgr.close()
 
 
+def _reserve_dead_owner(
+    mgr: DeviceManager,
+    serial: str,
+    dead_pid: int,
+    *,
+    owner: str = "seat-x",
+    timeout_seconds: int = TIMEOUT,
+) -> None:
+    """Reserve with a live owner_pid, then rewrite owner_pid to *dead_pid* (owner exited)."""
+    res = mgr.reserve(serial, owner=owner, owner_pid=os.getpid(), timeout_seconds=timeout_seconds)
+    assert not isinstance(res, str)
+    mgr._conn.execute(
+        "UPDATE reservations SET owner_pid = ? WHERE device_serial = ?", (dead_pid, serial)
+    )
+    mgr._conn.commit()
+
+
 def test_dead_owner_pid_reaped_with_fresh_heartbeat(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     try:
-        mgr.reserve("D1", owner="seat-x", owner_pid=_dead_pid())
+        _reserve_dead_owner(mgr, "D1", _dead_pid())
         assert mgr.check("D1") is not None
         mgr._reap_stale()
         assert mgr.check("D1") is None
@@ -122,7 +139,7 @@ def test_live_owner_pid_keeps_lease(tmp_path: Path) -> None:
 def test_guard_reaps_dead_owner_pid(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     try:
-        mgr.reserve("D1", owner="seat-x", owner_pid=_dead_pid())
+        _reserve_dead_owner(mgr, "D1", _dead_pid())
         assert mgr.guard("D1") is None
         assert mgr.check("D1") is None
     finally:
@@ -223,9 +240,10 @@ def test_live_owner_pid_still_times_out() -> None:
 def _orphan(mgr: DeviceManager, serial: str, owner_pid: int) -> None:
     """Reserve ``serial`` with an owner_pid, then rewrite the storing pid to a
     dead one — the state a restarted daemon finds on disk."""
-    mgr.reserve(serial, owner="seat-x", owner_pid=owner_pid, timeout_seconds=TIMEOUT)
+    mgr.reserve(serial, owner="seat-x", owner_pid=os.getpid(), timeout_seconds=TIMEOUT)
     mgr._conn.execute(
-        "UPDATE reservations SET pid = ? WHERE device_serial = ?", (_dead_pid(), serial)
+        "UPDATE reservations SET pid = ?, owner_pid = ? WHERE device_serial = ?",
+        (_dead_pid(), owner_pid, serial),
     )
     mgr._conn.commit()
 
@@ -306,7 +324,7 @@ def test_guard_logs_reap_reason(tmp_path: Path, monkeypatch: object) -> None:
     other = _mgr(tmp_path)
     holder = _mgr(tmp_path)
     try:
-        holder.reserve("A", owner="seat-x", owner_pid=_dead_pid())
+        _reserve_dead_owner(holder, "A", _dead_pid())
         log = MagicMock()
         monkeypatch.setattr(dm, "logger", log)  # type: ignore[attr-defined]
         assert other.guard("A") is None
@@ -336,7 +354,7 @@ def test_release_all_keeps_live_owner_lease(tmp_path: Path) -> None:
 def test_release_all_drops_dead_owner_lease(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     try:
-        mgr.reserve("A", owner="seat-x", owner_pid=_dead_pid())
+        _reserve_dead_owner(mgr, "A", _dead_pid())
         assert mgr.release_all() == 1
         assert mgr.check("A") is None
     finally:

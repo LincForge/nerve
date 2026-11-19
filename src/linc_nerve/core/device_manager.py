@@ -15,17 +15,55 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import structlog
 
-from linc_nerve.core.procs import pid_alive
+from linc_nerve.core.procs import pid_alive, pid_alive_same_uid
 
 logger = structlog.get_logger().bind(domain="device_control")
 
 _HEARTBEAT_INTERVAL = 30  # seconds
+MAX_TIMEOUT_SECONDS = 86_400
+
+
+def validate_timeout_seconds(timeout_seconds: Any) -> str | None:
+    """Return a validation error message if *timeout_seconds* is not an int in (0, 86400]."""
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, int)
+        or timeout_seconds <= 0
+        or timeout_seconds > MAX_TIMEOUT_SECONDS
+    ):
+        return (
+            f"timeout_seconds must be an integer in (0, {MAX_TIMEOUT_SECONDS}], "
+            f"got {timeout_seconds!r}"
+        )
+    return None
+
+
+def validate_owner_pid(owner_pid: Any) -> str | None:
+    """Return a validation error message if *owner_pid* is not 0 or a live same-UID pid > 1."""
+    if isinstance(owner_pid, bool) or not isinstance(owner_pid, int) or owner_pid < 0:
+        return (
+            f"owner_pid must be 0 or a live process pid > 1 owned by the caller, got {owner_pid!r}"
+        )
+    if owner_pid == 0:
+        return None
+    if owner_pid == 1 or not pid_alive_same_uid(owner_pid):
+        return (
+            f"owner_pid must be 0 or a live process pid > 1 owned by the caller, got {owner_pid!r}"
+        )
+    return None
+
+
+def validate_reserve_args(timeout_seconds: Any, owner_pid: Any) -> str | None:
+    """Return the first validation error for reserve's timeout_seconds/owner_pid, or None."""
+    return validate_timeout_seconds(timeout_seconds) or validate_owner_pid(owner_pid)
 
 
 def _default_db_path() -> Path:
@@ -142,9 +180,20 @@ class DeviceManager:
     reserve, release, and guard devices.
     """
 
-    def __init__(self, db_path: Path | None = None, *, renew_anonymous: bool = True) -> None:
+    def __init__(
+        self,
+        db_path: Path | None = None,
+        *,
+        renew_anonymous: bool = True,
+        controller: Any = None,
+        controller_getter: Callable[[], Any] | None = None,
+        probe_hw: Callable[[str], str] | None = None,
+    ) -> None:
         self._db_path = db_path if db_path is not None else _default_db_path()
         self.renew_anonymous: bool = renew_anonymous
+        self._controller = controller
+        self._controller_getter = controller_getter
+        self._probe_hw = probe_hw
         self._session_id = uuid.uuid4().hex[:12]
         self._pid = os.getpid()
         self._closed = False
@@ -223,6 +272,14 @@ class DeviceManager:
             self._conn.execute("ALTER TABLE reservations ADD COLUMN owner_pid INTEGER")
             self._conn.commit()
 
+    def _resolve_device_policy(self, serial: str) -> Any:
+        from linc_nerve.core import engagement
+
+        ctrl = (
+            self._controller_getter() if self._controller_getter is not None else self._controller
+        )
+        return engagement.resolve_device_decision(serial, controller=ctrl, probe_hw=self._probe_hw)
+
     def reserve(
         self,
         serial: str,
@@ -256,8 +313,15 @@ class DeviceManager:
         or it expires after ``timeout_seconds``.
 
         Returns a DeviceReservation on success, or an error string if the
-        device is already reserved by a different owner.
+        device is already reserved by a different owner or arguments are invalid.
         """
+        err = validate_reserve_args(timeout_seconds, owner_pid)
+        if err is not None:
+            return err
+
+        decision = self._resolve_device_policy(serial)
+        if decision.reason is not None:
+            return decision.reason
         now = time.time()
         stored_owner_pid = owner_pid or None
         resolved_owner = _default_owner(owner, owner_pid, self._session_id)

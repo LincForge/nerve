@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import math
 import os
-import tempfile
+import stat
 from collections.abc import Iterable
 from fractions import Fraction
 from pathlib import Path
@@ -170,11 +170,18 @@ def default_out_dir(video: Path) -> Path:
 
 def _system_tmp() -> Path:
     """The system temp dir (seam: tests re-point it)."""
-    return Path(tempfile.gettempdir())
+    from linc_nerve.core.engagement import default_temp_dir
+
+    return default_temp_dir()
 
 
 def allowed_out_roots(video: Path) -> list[Path]:
-    """Directories an out_dir may resolve into: the video's dir, $LINC_HOME, system tmp."""
+    """Directories an out_dir may resolve into (artifacts root only when active)."""
+    from linc_nerve.core import engagement
+
+    art_root = engagement.artifacts_root()
+    if art_root is not None:
+        return [art_root.resolve()]
     video_dir = video.expanduser().absolute().parent
     return [root.resolve() for root in (video_dir, linc_home(), _system_tmp())]
 
@@ -231,14 +238,30 @@ def _decode_frame_at(container: Any, stream: Any, t: float) -> tuple[Any, float]
     return frame, float((frame.pts - start) * time_base)
 
 
-# O_NOFOLLOW: a frame_<ms>.png symlink planted in a shared out_dir (the system
-# temp dir is an allowed root) must not redirect the write outside the roots.
-_PNG_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+# O_NOFOLLOW + no O_TRUNC: a frame_<ms>.png symlink or hard link planted in a
+# shared out_dir (the system temp dir is an allowed root) must not redirect or
+# truncate another inode before fstat checks S_ISREG and st_nlink == 1.
+# O_NONBLOCK refuses a planted FIFO without blocking in open().
+_PNG_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0)
 
 
 def _save_png(image: Image.Image, dest: Path) -> None:
-    """Write *image* as PNG to *dest*, never through a symlink."""
-    with os.fdopen(os.open(dest, _PNG_FLAGS, 0o644), "wb") as handle:
+    """Write *image* as PNG to *dest*, never through a symlink, hard link or FIFO."""
+    from linc_nerve.core import engagement
+
+    mode = 0o600 if engagement.artifacts_root() is not None else 0o644
+    fd = os.open(dest, _PNG_FLAGS, mode)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise OSError(f"not a single-link regular file: {dest}")
+        if mode == 0o600:
+            os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "wb") as handle:
         image.save(handle, format="PNG")
 
 
@@ -260,8 +283,10 @@ def _write_frame(frame: Any, t: float, t_actual: float, dest: Path) -> dict[str,
 
 def extract_validated(path: Path, timestamps: Iterable[float], out_dir: Path) -> list[dict]:
     """Extract frames for already range-checked *timestamps* into *out_dir*."""
+    from linc_nerve.core import engagement
+
     wanted = unique_by_ms(timestamps)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    engagement.ensure_private_dir(out_dir, 0o700)
     results: list[dict] = []
     with open_video(path) as container:
         stream = _video_stream(container)
@@ -309,6 +334,9 @@ def _validated_request(
     video_path: str, timestamps: str, out_dir: str
 ) -> tuple[Path, list[float], float, Path]:
     """Check every input before anything is written; raise ``ValueError`` if bad."""
+    from linc_nerve.core import engagement
+
+    engagement.artifacts_root()
     wanted = parse_timestamps(timestamps)
     path = Path(video_path).expanduser()
     target = confine_out_dir(path, Path(out_dir) if out_dir else default_out_dir(path))
@@ -321,11 +349,15 @@ def _validated_request(
 
 def extract_request(video_path: str, timestamps: str, out_dir: str = "") -> dict[str, Any]:
     """Tool body: validate inputs, then extract. Returns a result or error dict."""
+    from linc_nerve.core import engagement
+
     try:
         path, wanted, duration, target = _validated_request(video_path, timestamps, out_dir)
-    except ValueError as exc:
+        extracted = extract_validated(path, wanted, target)
+    except engagement.EngagementMisconfiguredError as exc:
+        return engagement.refusal_payload(exc)
+    except (ValueError, OSError) as exc:
         return _validation_error(str(exc), **getattr(exc, "extra", {}))
-    extracted = extract_validated(path, wanted, target)
     return {
         "duration_s": round(duration, 3),
         "frames": extracted,

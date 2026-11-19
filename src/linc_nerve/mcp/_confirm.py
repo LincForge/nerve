@@ -1,4 +1,4 @@
-"""Shared confirmation gate for destructive nerve tools (reactor c12557f2).
+"""Shared confirmation gate for destructive nerve tools.
 
 Deliberately does NOT import ``linc_nerve.mcp._core`` — ``_core`` registers
 tools from modules that import this one, so an import back into ``_core``

@@ -6,8 +6,8 @@ and modules that bind a logger at import time keep that object for the life of t
 process. Under pytest that object is the first session's capture stream. mutmut runs
 pytest in-process twice (stats, then clean tests), so on the second run every log call
 hit a closed stream: ``ValueError: I/O operation on closed file``. That turned most
-diff-mutation runs on linc-nerve into INSTRUMENT_ERROR from 2026-10-01 on
-(linc-ops#1121). The same failure hits any test that runs after another test closed
+diff-mutation runs on nerve into INSTRUMENT_ERROR.
+The same failure hits any test that runs after another test closed
 ``sys.stderr``.
 """
 

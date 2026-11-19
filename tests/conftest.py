@@ -2,8 +2,11 @@
 
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
+import time
+from typing import Any
 
 import pytest
 
@@ -42,6 +45,54 @@ def _isolate_linc_env(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -
     value locally (later setenv wins).
     """
     monkeypatch.setenv("LINC_HOME", str(tmp_path / "linc_home"))
+
+
+@pytest.fixture(autouse=True)
+def _default_xcode_first_launch_ready():
+    """Default pre-existing unit tests to a warm "Xcode first launch ready" cache
+    so Linux CI and single-command subprocess fakes in test_ios / test_crap_critical_gaps
+    exercise their downstream xcrun logic; gate tests call
+    _reset_xcode_first_launch_state() to exercise the cold probe.
+    """
+    from linc_nerve.core import ios_discovery
+
+    ios_discovery._first_launch_cache = (time.monotonic(), True)
+    ios_discovery._first_launch_last_state = True
+    try:
+        yield
+    finally:
+        ios_discovery._reset_xcode_first_launch_state()
+
+
+@pytest.fixture(autouse=True)
+def _guard_no_real_pkill_or_adb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail any test that spawns real ``pkill`` or ``adb`` without faking subprocess."""
+    from linc_nerve.core.adb_path import ADB_PATH
+
+    real_popen = subprocess.Popen
+
+    def _forbid_pkill_or_adb(cmd: object) -> None:
+        if isinstance(cmd, (str, os.PathLike)):
+            tokens = str(cmd).split()
+            prog = tokens[0] if tokens else ""
+        elif isinstance(cmd, (list, tuple)) and cmd:
+            prog = str(cmd[0])
+        else:
+            return
+        name = pathlib.Path(prog).name
+        if name in {"pkill", "adb"} or prog == ADB_PATH:
+            raise AssertionError(
+                f"Unfaked subprocess call to {name or prog!r} is forbidden in tests: {cmd!r}"
+            )
+
+    class _GuardedPopen(real_popen):  # type: ignore[misc,valid-type]
+        """``Popen`` subclass (keeps ``Popen[bytes]`` + isinstance); ``run`` uses it too."""
+
+        def __init__(self, args: Any, *rest: Any, **kwargs: Any) -> None:
+            _forbid_pkill_or_adb(args)
+            super().__init__(args, *rest, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
 
 
 @pytest.fixture

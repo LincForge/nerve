@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from linc_nerve.core import engagement
 from linc_nerve.core.contracts import require
 from linc_nerve.mcp import _core
 from linc_nerve.mcp._core import global_tool
@@ -19,7 +20,13 @@ def _nerve_discover_sync() -> dict[str, Any]:
     """
     _core._ensure_initialized()
     all_devices = _core._refresh_cache()
-    devices: list[dict] = [d.to_dict() for d in all_devices]
+    failed = getattr(_core._android, "_last_discover_failed_serials", None)
+    devices: list[dict] = engagement.annotate_discovered_devices(
+        all_devices,
+        failed_serials=failed,
+        probe_hw=_core._probe_android_hardware_serial,
+        controller=_core._android,
+    )
     return {
         "devices": devices,
         "count": len(devices),

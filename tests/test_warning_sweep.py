@@ -176,6 +176,16 @@ class TestResolveBundleIdPhysical:
 
 # ── scrcpy.ScrcpyManager.screenshot ─────────────────────────────────
 class TestScrcpyManagerScreenshot:
+    @pytest.fixture(autouse=True)
+    def _no_orphan_forward_sweep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """ScrcpyManager() sweeps orphan forwards with a real ``adb forward --list``;
+        stub it so these tests never spawn (or start) a real adb server."""
+        from linc_nerve.core.scrcpy import ScrcpyManager
+
+        monkeypatch.setattr(
+            ScrcpyManager, "_sweep_orphan_forwards", staticmethod(lambda surviving: None)
+        )
+
     def test_screenshot_happy_path(self) -> None:
         from linc_nerve.core.scrcpy import ScrcpyManager
 

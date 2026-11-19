@@ -1,9 +1,13 @@
 """Buffered stdio transport — drop-in replacement for mcp.server.stdio.
 
-mcp 1.26.0 uses ``anyio.create_memory_object_stream(0)`` (unbuffered
-rendezvous channels) for both the read and write paths, creating deadlocks.
+History: mcp 1.26 used ``anyio.create_memory_object_stream(0)`` (unbuffered
+rendezvous channels) for both the read and write paths, which deadlocked
+``nerve bellows`` on the 3rd sequential tool call. mcp 2.3's
+``mcp.server.stdio.stdio_server`` still creates zero-buffer channels
+(``create_context_streams(0)``) and reads stdin through ``anyio.wrap_file``
+worker threads, so nerve keeps this transport on 2.x.
 
-This implementation fixes two issues:
+This implementation:
 
 1. **Buffered channels** (size=32) decouple reading from writing.
 2. **Native asyncio I/O** — uses ``asyncio.StreamReader``/``StreamWriter``
@@ -11,6 +15,11 @@ This implementation fixes two issues:
    ``connect_write_pipe``.  No threads, no TextIOWrapper, no buffering
    layers.  This eliminates the hang-after-2-calls bug caused by
    thread-pool exhaustion or stale thread state in ``anyio.to_thread``.
+3. **Never dies on input** — every inbound line yields either a dispatched
+   ``SessionMessage`` or an ``Exception`` item on the read stream (malformed
+   JSON, invalid UTF-8, a line over ``_MAX_LINE``). Parsing and serialization
+   follow upstream mcp 2.3 ``stdio.py`` (``jsonrpc_message_adapter``,
+   ``exclude_unset=True``).
 """
 
 from __future__ import annotations
@@ -30,6 +39,11 @@ from mcp.shared.message import SessionMessage
 # Buffer size for the internal channels.  32 is generous for sequential
 # tool calls; the important thing is that it's >0.
 _BUF = 32
+
+# Longest accepted JSON-RPC line. asyncio's default StreamReader limit (64 KiB)
+# raised out of readline() and killed the server on any longer request; an
+# over-limit line is now dropped and reported as an Exception item instead.
+_MAX_LINE = 16 * 1024 * 1024
 
 # Debug logging — writes to stderr to avoid corrupting the JSON-RPC stream.
 _DEBUG = os.environ.get("NERVE_STDIO_DEBUG", "").lower() in ("1", "true", "yes")
@@ -56,17 +70,15 @@ async def buffered_stdio_server() -> AsyncIterator[
     loop = asyncio.get_running_loop()
 
     # Connect stdin as an asyncio StreamReader (non-blocking, fd-based).
-    stdin_reader = asyncio.StreamReader()
+    stdin_reader = asyncio.StreamReader(limit=_MAX_LINE)
     stdin_protocol = asyncio.StreamReaderProtocol(stdin_reader)
-    await loop.connect_read_pipe(lambda: stdin_protocol, sys.stdin.buffer)
+    stdin_transport, _ = await loop.connect_read_pipe(lambda: stdin_protocol, sys.stdin.buffer)
 
     # Connect stdout as an asyncio StreamWriter (non-blocking, fd-based).
     stdout_transport, stdout_protocol = await loop.connect_write_pipe(
         asyncio.streams.FlowControlMixin, sys.stdout.buffer
     )
-    stdout_writer = asyncio.StreamWriter(
-        stdout_transport, stdout_protocol, stdin_reader, loop
-    )
+    stdout_writer = asyncio.StreamWriter(stdout_transport, stdout_protocol, stdin_reader, loop)
 
     read_stream: MemoryObjectReceiveStream[SessionMessage | Exception]
     read_stream_writer: MemoryObjectSendStream[SessionMessage | Exception]
@@ -84,12 +96,21 @@ async def buffered_stdio_server() -> AsyncIterator[
         try:
             async with read_stream_writer:
                 while True:
-                    line_bytes = await stdin_reader.readline()
+                    try:
+                        line_bytes = await stdin_reader.readline()
+                    except ValueError as exc:
+                        # Line longer than _MAX_LINE: asyncio has already dropped it.
+                        await read_stream_writer.send(exc)
+                        continue
                     if not line_bytes:
                         _dbg("stdin  EOF")
                         break
 
-                    line = line_bytes.decode("utf-8").rstrip("\n")
+                    try:
+                        line = line_bytes.decode("utf-8").rstrip("\n")
+                    except UnicodeDecodeError as exc:
+                        await read_stream_writer.send(exc)
+                        continue
                     if not line:
                         continue
 
@@ -97,7 +118,7 @@ async def buffered_stdio_server() -> AsyncIterator[
                     _dbg(f"stdin  #{_msg_counter['in']} len={len(line)}")
 
                     try:
-                        message = types.JSONRPCMessage.model_validate_json(line)
+                        message = types.jsonrpc_message_adapter.validate_json(line, by_name=False)
                     except Exception as exc:
                         await read_stream_writer.send(exc)
                         continue
@@ -114,8 +135,10 @@ async def buffered_stdio_server() -> AsyncIterator[
             async with write_stream_reader:
                 async for session_message in write_stream_reader:
                     _msg_counter["out"] += 1
+                    # exclude_unset (as upstream mcp 2.3 stdio.py) keeps a required
+                    # null such as an error reply's "id": null; exclude_none dropped it.
                     json_str = session_message.message.model_dump_json(
-                        by_alias=True, exclude_none=True
+                        by_alias=True, exclude_unset=True
                     )
                     payload = (json_str + "\n").encode("utf-8")
                     _dbg(f"stdout #{_msg_counter['out']} len={len(payload)} writing...")
@@ -125,7 +148,12 @@ async def buffered_stdio_server() -> AsyncIterator[
         except anyio.ClosedResourceError:
             await anyio.lowlevel.checkpoint()
 
-    async with anyio.create_task_group() as tg:
-        tg.start_soon(_stdin_reader_task)
-        tg.start_soon(_stdout_writer_task)
-        yield read_stream, write_stream
+    try:
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(_stdin_reader_task)
+            tg.start_soon(_stdout_writer_task)
+            yield read_stream, write_stream
+    finally:
+        # Release both pipe transports (an unclosed StreamWriter is a ResourceWarning).
+        stdout_writer.close()
+        stdin_transport.close()

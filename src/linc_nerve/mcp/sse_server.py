@@ -24,6 +24,7 @@ import structlog
 
 from linc_nerve.core.crash_watcher import classify_log_line_crash
 from linc_nerve.core.http_port import DEFAULT_HTTP_PORT, resolve_http_port
+from linc_nerve.core.timeouts import DAEMON_CEILING_S
 from linc_nerve.mcp._core import _ensure_initialized, _get_controller, _resolve_device
 from linc_nerve.mcp.request_guard import check_request
 
@@ -37,9 +38,8 @@ SSE_PORT = DEFAULT_HTTP_PORT
 # coroutine forever.
 _DRAIN_TIMEOUT_S = 5.0
 
-# Bound on reading a normal (in-budget) POST body off the socket
-# (linc-nerve#128/129 round 1 finding 1 — REGRESSION). The round-0 repair's
-# `readexactly(content_length)` in the in-budget branch had NO timeout: a
+# Bound on reading a normal (in-budget) POST body off the socket.
+# The prior `readexactly(content_length)` in the in-budget branch had NO timeout: a
 # client that declares a genuine (in-budget) Content-Length and then either
 # never finishes sending the body, or sends fewer bytes and holds the
 # connection open, parks the handler coroutine forever — an unauthenticated
@@ -49,7 +49,7 @@ _DRAIN_TIMEOUT_S = 5.0
 _READ_TIMEOUT_S = 10.0
 
 # Chunk size + memory cap for draining a REJECTED oversized body off the
-# socket (linc-nerve#128/129 round 2 finding 4 — NEW DoS, REGRESSION).
+# socket (round 2 finding 4 — NEW DoS, REGRESSION).
 # `content_length` here is UNVALIDATED ATTACKER INPUT parsed straight out
 # of the request headers by `_read_headers`; the round-1 drain used
 # `readexactly(content_length)`, which ACCUMULATES the entire declared
@@ -103,7 +103,7 @@ _GLOBAL_LANE = "__global__"
 _OVERFLOW_LANE = "__overflow__"
 _MAX_DEVICE_LANES = 64  # comfortably above the 54-device farm
 
-_DEFAULT_TOOL_TIMEOUT = 180.0  # seconds — above the longest legit op (iOS install ~120s)
+_DEFAULT_TOOL_TIMEOUT = DAEMON_CEILING_S  # seconds — above longest legit op (iOS install ~120s)
 
 
 def _lane_for_request(path: str, body: dict) -> str:
@@ -645,11 +645,18 @@ async def _read_json_tool_body(
         return {}, True
 
     try:
-        return json.loads(raw), False
+        parsed = json.loads(raw)
     except json.JSONDecodeError:
         _send_json_response(writer, 400, {"error": "Invalid JSON body"})
         await writer.drain()
         return {}, True
+
+    if not isinstance(parsed, dict):
+        _send_json_response(writer, 400, {"error": "JSON body must be an object"})
+        await writer.drain()
+        return {}, True
+
+    return parsed, False
 
 
 async def _handle_json_tool_request(

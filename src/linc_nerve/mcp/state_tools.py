@@ -41,8 +41,11 @@ def _nerve_ensure_ready_sync(device: str = "", require_network: bool = False) ->
         {awake, unlocked, battery_pct, charging, ready, reason, actions_taken, platform,
         network}. ``network`` is {transport, default_network, validated, reachable,
         online} (no ping here; reachable stays null). iOS physical also carries
-        report_only=True with null state fields; on iOS ``network`` is all-unknown
-        with note "not checked on iOS" and require_network is ignored.
+        ``lock_state`` ("locked" | "unlocked" | "unknown") and ``report_only``
+        (False when lock_state is known — ready=False, reason="ios_locked" when
+        locked; True with reason="ios_physical_state_not_detectable" when unknown);
+        on iOS ``network`` is all-unknown with note "not checked on iOS" and
+        require_network is ignored.
     """
     dev, platform = _core._resolve_device(device)
     if dev is None:
@@ -69,10 +72,46 @@ def _ios_network() -> dict[str, Any]:
     return {**unknown_network().as_dict(), "note": _IOS_NOTE}
 
 
+def _read_ios_lock_state(ios: Any, device: str) -> str:
+    """``ios.lock_state`` behind a never-raises seam (anything odd -> 'unknown')."""
+    try:
+        state = ios.lock_state(device)
+    except Exception:
+        return "unknown"
+    return state if state in ("locked", "unlocked") else "unknown"
+
+
 def _ios_verdict(device: str) -> dict[str, Any]:
-    """iOS readiness — report-only on physical devices, always ready on simulators."""
+    """iOS readiness — devicectl lockState on physical devices, always ready on simulators."""
     _, ios = _core._ensure_initialized()
     if ios._is_physical(device):
+        state = _read_ios_lock_state(ios, device)
+        if state == "locked":
+            return {
+                "ready": False,
+                "report_only": False,
+                "reason": "ios_locked",
+                "platform": "ios",
+                "awake": None,
+                "unlocked": False,
+                "battery_pct": None,
+                "charging": None,
+                "actions_taken": [],
+                "lock_state": "locked",
+            }
+        if state == "unlocked":
+            return {
+                "ready": True,
+                "report_only": False,
+                "reason": "ok",
+                "platform": "ios",
+                "awake": None,
+                "unlocked": True,
+                "battery_pct": None,
+                "charging": None,
+                "actions_taken": [],
+                "lock_state": "unlocked",
+            }
         return {
             "ready": True,
             "report_only": True,
@@ -83,6 +122,7 @@ def _ios_verdict(device: str) -> dict[str, Any]:
             "battery_pct": None,
             "charging": None,
             "actions_taken": [],
+            "lock_state": "unknown",
         }
     return {
         "ready": True,

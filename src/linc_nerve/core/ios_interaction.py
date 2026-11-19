@@ -93,14 +93,17 @@ class _InteractionMixin:
     def _try_mjpeg_screenshot(self, serial: str, full_resolution: bool) -> bytes | None:
         """Warm WDA MJPEG frame for a simulator, or None to fall back to simctl.
 
+        Never starts or builds WDA — only uses an already-running healthy session.
         No device lock — the stream has its own internal lock, mirroring the
         Android/scrcpy fast path.
         """
-        session = self._get_wda(serial)
-        port = getattr(session, "mjpeg_port", None)
-        if port is None or self._mjpeg.is_open(serial):
-            return None
         try:
+            session = self._wda.running(serial)
+            if session is None:
+                return None
+            port = getattr(session, "mjpeg_port", None)
+            if port is None or self._mjpeg.is_open(serial):
+                return None
             data = self._mjpeg.screenshot(serial, port)
         except Exception as exc:
             _ios.logger.debug("ios_mjpeg_fallback", serial=serial[:12], error=str(exc))
@@ -113,7 +116,9 @@ class _InteractionMixin:
         iOS 26 sims reject `simctl io screenshot -` (stdout: 'volume is read only'),
         so we write to a real path, read it, and unlink. (Bug abf68b2c.)
         """
-        fd, path = tempfile.mkstemp(suffix=".png")
+        from linc_nerve.core.engagement import scratch_dir
+
+        fd, path = tempfile.mkstemp(suffix=".png", dir=scratch_dir())
         os.close(fd)
         try:
             res = self._run_binary("io", serial, "screenshot", "--type=png", path)

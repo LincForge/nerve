@@ -199,7 +199,7 @@ class TestIOSScreenshot:
 
         with (
             patch.object(ctrl, "_is_physical", return_value=False),
-            patch.object(ctrl, "_get_wda", return_value=session),
+            patch.object(ctrl._wda, "running", return_value=session),
             patch.object(ctrl, "_run_binary", side_effect=fake_run_binary) as mock_run,
         ):
             data = ctrl.screenshot(SIM_UUID)
@@ -329,7 +329,7 @@ class TestIOSScreenshot:
         with (
             patch.object(ctrl, "_is_physical", return_value=False),
             patch.object(ctrl, "discover", return_value=[watch_dev]),
-            patch.object(ctrl, "_get_wda", return_value=wda_session) as mock_get_wda,
+            patch.object(ctrl._wda, "running", return_value=wda_session) as mock_running,
             patch.object(ctrl._mjpeg, "is_open", return_value=False),
             patch.object(ctrl._mjpeg, "screenshot", return_value=wda_png),
             patch.object(ctrl, "_run_binary", side_effect=fake_run_binary),
@@ -337,11 +337,11 @@ class TestIOSScreenshot:
             data = ctrl.screenshot(watch_udid, full_resolution=True)
 
         assert data == simctl_png
-        mock_get_wda.assert_not_called()
+        mock_running.assert_not_called()
 
     def test_screenshot_simulator_iphone_uses_mjpeg_fast_path(self) -> None:
         """An iPhone-simulator serial still takes the MJPEG fast path
-        (_get_wda is consulted, and the frame is returned when mjpeg_port is set).
+        (_wda.running is consulted, and the frame is returned when mjpeg_port is set).
         """
         ctrl = IOSController()
         iphone_udid = SIM_UUID
@@ -353,7 +353,7 @@ class TestIOSScreenshot:
         with (
             patch.object(ctrl, "_is_physical", return_value=False),
             patch.object(ctrl, "discover", return_value=[iphone_dev]),
-            patch.object(ctrl, "_get_wda", return_value=wda_session) as mock_get_wda,
+            patch.object(ctrl._wda, "running", return_value=wda_session) as mock_running,
             patch.object(ctrl._mjpeg, "is_open", return_value=False),
             patch.object(ctrl._mjpeg, "screenshot", return_value=mjpeg_png),
             patch.object(ctrl, "_run_binary") as mock_run_binary,
@@ -361,7 +361,7 @@ class TestIOSScreenshot:
             data = ctrl.screenshot(iphone_udid, full_resolution=True)
 
         assert data == mjpeg_png
-        mock_get_wda.assert_called_once_with(iphone_udid)
+        mock_running.assert_called_once_with(iphone_udid)
         mock_run_binary.assert_not_called()
 
     def test_screenshot_iphone_caches_device_type_lookup(self) -> None:
@@ -378,7 +378,7 @@ class TestIOSScreenshot:
         with (
             patch.object(ctrl, "_is_physical", return_value=False),
             patch.object(ctrl, "discover", return_value=[iphone_dev]) as mock_discover,
-            patch.object(ctrl, "_get_wda", return_value=wda_session),
+            patch.object(ctrl._wda, "running", return_value=wda_session),
             patch.object(ctrl._mjpeg, "is_open", return_value=False),
             patch.object(ctrl._mjpeg, "screenshot", return_value=mjpeg_png),
         ):
@@ -392,7 +392,8 @@ class TestIOSScreenshot:
     def test_screenshot_watch_retries_discovery_after_initial_miss(self) -> None:
         """A discovery miss is not cached permanently: if discover() initially returns []
         (transient boot-up or simctl glitch) and later returns the watch device,
-        the second screenshot(watch_udid) resolves the type, skips _get_wda, and routes to simctl.
+        the second screenshot(watch_udid) resolves the type, skips _wda.running,
+        and routes to simctl.
         """
         ctrl = IOSController()
         watch_udid = "35FE5643-28E2-452F-B430-BB5D16ED862A"
@@ -408,18 +409,18 @@ class TestIOSScreenshot:
         with (
             patch.object(ctrl, "_is_physical", return_value=False),
             patch.object(ctrl, "discover", side_effect=[[], [watch_dev]]) as mock_discover,
-            patch.object(ctrl, "_get_wda") as mock_get_wda,
+            patch.object(ctrl._wda, "running") as mock_running,
             patch.object(ctrl, "_run_binary", side_effect=fake_run_binary),
         ):
-            mock_get_wda.return_value = MagicMock(mjpeg_port=None)
+            mock_running.return_value = MagicMock(mjpeg_port=None)
             data1 = ctrl.screenshot(watch_udid, full_resolution=True)
             assert data1 == simctl_png
-            assert mock_get_wda.call_count == 1
+            assert mock_running.call_count == 1
 
-            mock_get_wda.reset_mock()
+            mock_running.reset_mock()
             data2 = ctrl.screenshot(watch_udid, full_resolution=True)
             assert data2 == simctl_png
-            mock_get_wda.assert_not_called()
+            mock_running.assert_not_called()
             assert mock_discover.call_count == 2
 
     def test_screenshot_simctl_failed_capture_raises(self) -> None:
@@ -793,17 +794,42 @@ class TestIOSAppLifecycle:
 
     def test_kill_physical(self) -> None:
         ctrl = IOSController()
-        with patch.object(ctrl, "_run_devicectl") as mock_run:
-            ctrl.kill(PHYS_UDID, "com.app.bundle")
-        mock_run.assert_called_once_with(
-            "device",
-            "process",
-            "terminate",
-            "--device",
-            PHYS_UDID,
-            "com.app.bundle",
-            check=False,
-        )
+        app_url = "/private/var/containers/Bundle/Application/UUID/Example.app/"
+        apps_payload = {
+            "result": {"apps": [{"bundleIdentifier": "com.example.app", "url": app_url}]}
+        }
+        procs_responses = [
+            {
+                "result": {
+                    "runningProcesses": [
+                        {"executable": f"{app_url}Example", "processIdentifier": 4242}
+                    ]
+                }
+            },
+            {"result": {"runningProcesses": []}},
+        ]
+
+        def fake_devicectl(*args: Any, **kwargs: Any) -> MagicMock:
+            if args[:3] == ("device", "info", "apps"):
+                path = args[args.index("--json-output") + 1]
+                Path(path).write_text(json.dumps(apps_payload), encoding="utf-8")
+            elif args[:3] == ("device", "info", "processes"):
+                path = args[args.index("--json-output") + 1]
+                Path(path).write_text(json.dumps(procs_responses.pop(0)), encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        with patch.object(ctrl, "_run_devicectl", side_effect=fake_devicectl) as mock_run:
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        terminate_calls = [
+            c.args
+            for c in mock_run.call_args_list
+            if c.args[:3] == ("device", "process", "terminate")
+        ]
+        assert terminate_calls == [
+            ("device", "process", "terminate", "--device", PHYS_UDID, "--pid", "4242")
+        ]
+        assert all("com.example.app" not in c.args for c in mock_run.call_args_list)
 
     def test_uninstall_simulator(self) -> None:
         ctrl = IOSController()
@@ -823,6 +849,357 @@ class TestIOSAppLifecycle:
             PHYS_UDID,
             "com.app.bundle",
         )
+
+
+class TestIOSPhysicalKill:
+    """Contract tests for physical-iOS kill by PID (linc-nerve-7eb0)."""
+
+    @staticmethod
+    def _make_devicectl_runner(
+        apps_payload: Any,
+        procs_payloads: list[Any],
+        *,
+        seen_paths: list[Path] | None = None,
+    ):
+        procs_queue = list(procs_payloads)
+
+        def runner(*args: Any, **kwargs: Any) -> MagicMock:
+            if "--json-output" in args:
+                path = Path(args[args.index("--json-output") + 1])
+                if seen_paths is not None:
+                    seen_paths.append(path)
+                if args[:3] == ("device", "info", "apps"):
+                    if isinstance(apps_payload, Exception):
+                        raise apps_payload
+                    if isinstance(apps_payload, str):
+                        path.write_text(apps_payload, encoding="utf-8")
+                    else:
+                        path.write_text(json.dumps(apps_payload), encoding="utf-8")
+                elif args[:3] == ("device", "info", "processes"):
+                    item = procs_queue.pop(0)
+                    if isinstance(item, Exception):
+                        raise item
+                    if isinstance(item, str):
+                        path.write_text(item, encoding="utf-8")
+                    else:
+                        path.write_text(json.dumps(item), encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        return runner
+
+    def test_kill_raises_when_pid_survives_and_nerve_kill_returns_error(self) -> None:
+        """(2) When terminate fails and PID 4242 still runs, kill() raises RuntimeError
+        and _nerve_kill_sync returns {"error": "Kill failed: ..."} instead of {"success": True}.
+        """
+        from linc_nerve.mcp import _core
+        from linc_nerve.mcp.app_tools import _nerve_kill_sync
+
+        ctrl = IOSController()
+        app_url = "/private/var/containers/Bundle/Application/UUID/Example.app/"
+        apps_payload = {
+            "result": {"apps": [{"bundleIdentifier": "com.example.app", "url": app_url}]}
+        }
+        running = {
+            "result": {
+                "runningProcesses": [
+                    {"executable": f"{app_url}Example", "processIdentifier": 4242}
+                ]
+            }
+        }
+        runner = self._make_devicectl_runner(apps_payload, [running, running])
+        with (
+            patch.object(ctrl, "_run_devicectl", side_effect=runner),
+            pytest.raises(RuntimeError, match=r"com\.example\.app.*4242"),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        runner2 = self._make_devicectl_runner(apps_payload, [running, running])
+        phys_dev = NerveDevice(
+            serial=PHYS_UDID,
+            platform=Platform.IOS,
+            device_type=DeviceType.PHONE,
+            model="iPhone",
+        )
+        with (
+            patch.object(ctrl, "_run_devicectl", side_effect=runner2),
+            patch.object(_core, "_resolve_device", return_value=(phys_dev, "ios")),
+            patch.object(_core, "_check_guard", return_value=None),
+            patch.object(_core, "_get_controller", return_value=ctrl),
+        ):
+            res = _nerve_kill_sync(device=PHYS_UDID, package="com.example.app")
+
+        assert "success" not in res
+        assert res["error"].startswith("Kill failed:")
+        assert "com.example.app" in res["error"]
+        assert "4242" in res["error"]
+
+    def test_sibling_prefix_collision_does_not_match(self) -> None:
+        """(3) Sibling prefix collision: '.../Foo.app' does NOT match '.../FooBar.app/FooBar'."""
+        from linc_nerve.mcp.diagnostic_tools import _devicectl_pid
+
+        ctrl = IOSController()
+        apps_payload = {
+            "result": {
+                "apps": [
+                    {
+                        "bundleIdentifier": "com.example.app",
+                        "url": "/private/var/containers/Bundle/Application/UUID/Foo.app",
+                    }
+                ]
+            }
+        }
+        procs_payload = {
+            "result": {
+                "runningProcesses": [
+                    {
+                        "executable": (
+                            "/private/var/containers/Bundle/Application/UUID/FooBar.app/FooBar"
+                        ),
+                        "processIdentifier": 9999,
+                    }
+                ]
+            }
+        }
+        runner = self._make_devicectl_runner(apps_payload, [procs_payload])
+        with patch.object(ctrl, "_run_devicectl", side_effect=runner) as mock_run:
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        terminate_calls = [
+            c for c in mock_run.call_args_list if c.args[:3] == ("device", "process", "terminate")
+        ]
+        assert terminate_calls == []
+
+        def fake_subproc(cmd: list[str], **kwargs: Any) -> MagicMock:
+            path = Path(cmd[cmd.index("--json-output") + 1])
+            if "apps" in cmd:
+                path.write_text(json.dumps(apps_payload), encoding="utf-8")
+            elif "processes" in cmd:
+                path.write_text(json.dumps(procs_payload), encoding="utf-8")
+            return MagicMock(returncode=0)
+
+        with patch("subprocess.run", side_effect=fake_subproc):
+            assert _devicectl_pid(PHYS_UDID, "com.example.app") is None
+
+    def test_main_executable_terminated_before_widget_extension(self) -> None:
+        """(4) Bundle with main executable (PID 100) and widget extension (PID 101)
+        terminates main first and leaves zero surviving PIDs.
+        """
+        ctrl = IOSController()
+        app_url = "/private/var/containers/Bundle/Application/UUID/Example.app/"
+        apps_payload = {
+            "result": {"apps": [{"bundleIdentifier": "com.example.app", "url": app_url}]}
+        }
+        procs_before = {
+            "result": {
+                "runningProcesses": [
+                    {
+                        "executable": f"{app_url}PlugIns/Widget.appex/Widget",
+                        "processIdentifier": 101,
+                    },
+                    {
+                        "executable": f"{app_url}Example",
+                        "processIdentifier": 100,
+                    },
+                ]
+            }
+        }
+        procs_after = {"result": {"runningProcesses": []}}
+        runner = self._make_devicectl_runner(apps_payload, [procs_before, procs_after])
+        with patch.object(ctrl, "_run_devicectl", side_effect=runner) as mock_run:
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        terminated_pids = [
+            c.args[c.args.index("--pid") + 1]
+            for c in mock_run.call_args_list
+            if c.args[:3] == ("device", "process", "terminate")
+        ]
+        assert terminated_pids == ["100", "101"]
+
+    def test_idempotent_noop_and_fail_closed_on_transport_or_json_error(self) -> None:
+        """(5) Idempotent no-op when installed with 0 processes or not installed;
+        transport failure or malformed JSON on info apps/processes raises.
+        """
+        ctrl = IOSController()
+        app_url = "/private/var/containers/Bundle/Application/UUID/Example.app/"
+        installed_apps = {
+            "result": {"apps": [{"bundleIdentifier": "com.example.app", "url": app_url}]}
+        }
+        empty_procs = {"result": {"runningProcesses": []}}
+
+        # Installed, 0 running processes -> no-op
+        runner_zero = self._make_devicectl_runner(installed_apps, [empty_procs])
+        with patch.object(ctrl, "_run_devicectl", side_effect=runner_zero) as mock_run:
+            ctrl.kill(PHYS_UDID, "com.example.app")
+        assert [c for c in mock_run.call_args_list if "terminate" in c.args] == []
+
+        # Not installed -> no-op without querying processes
+        not_installed = {"result": {"apps": [{"bundleIdentifier": "com.other", "url": app_url}]}}
+        runner_absent = self._make_devicectl_runner(not_installed, [])
+        with patch.object(ctrl, "_run_devicectl", side_effect=runner_absent) as mock_run:
+            ctrl.kill(PHYS_UDID, "com.example.app")
+        assert len(mock_run.call_args_list) == 1
+
+        # Transport error on info apps -> raises
+        cpe = subprocess.CalledProcessError(1, ["xcrun", "devicectl"], stderr="disconnected")
+        with (
+            patch.object(ctrl, "_run_devicectl", side_effect=self._make_devicectl_runner(cpe, [])),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        # Transport error on info processes -> raises
+        with (
+            patch.object(
+                ctrl,
+                "_run_devicectl",
+                side_effect=self._make_devicectl_runner(installed_apps, [cpe]),
+            ),
+            pytest.raises(subprocess.CalledProcessError),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        # Malformed JSON on info apps -> raises
+        with (
+            patch.object(
+                ctrl,
+                "_run_devicectl",
+                side_effect=self._make_devicectl_runner("{bad json", []),
+            ),
+            pytest.raises(json.JSONDecodeError),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        # Malformed JSON on info processes -> raises
+        with (
+            patch.object(
+                ctrl,
+                "_run_devicectl",
+                side_effect=self._make_devicectl_runner(installed_apps, ["{bad json"]),
+            ),
+            pytest.raises(json.JSONDecodeError),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+    def test_hostile_json_inputs_and_scratch_dir_unlink(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """(6) Hostile inputs in processes/apps JSON are ignored safely; temp JSON files
+        are created under scratch_dir() and unlinked even on exception.
+        """
+        from linc_nerve.core import engagement
+
+        custom_scratch = tmp_path / "scratch"
+        custom_scratch.mkdir()
+        monkeypatch.setattr(engagement, "scratch_dir", lambda: custom_scratch)
+
+        ctrl = IOSController()
+        app_url = "/private/var/containers/Bundle/Application/UUID/Example.app/"
+
+        # Missing result in apps JSON -> safe no-op
+        seen: list[Path] = []
+        with patch.object(
+            ctrl,
+            "_run_devicectl",
+            side_effect=self._make_devicectl_runner({}, [], seen_paths=seen),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        # Empty url in apps JSON -> safe no-op
+        empty_url_apps = {
+            "result": {
+                "apps": [
+                    {"bundleIdentifier": "com.example.app", "url": ""},
+                    {"bundleIdentifier": "com.example.app", "url": "/"},
+                ]
+            }
+        }
+        with patch.object(
+            ctrl,
+            "_run_devicectl",
+            side_effect=self._make_devicectl_runner(empty_url_apps, [], seen_paths=seen),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        # Hostile processIdentifier values (0, -1, True, "x") + missing result in processes
+        installed_apps = {
+            "result": {"apps": [{"bundleIdentifier": "com.example.app", "url": app_url}]}
+        }
+        hostile_procs = {
+            "result": {
+                "runningProcesses": [
+                    {"executable": f"{app_url}Example", "processIdentifier": 0},
+                    {"executable": f"{app_url}Example", "processIdentifier": -1},
+                    {"executable": f"{app_url}Example", "processIdentifier": True},
+                    {"executable": f"{app_url}Example", "processIdentifier": "x"},
+                    {"executable": None, "processIdentifier": 500},
+                    "not-a-dict",
+                ]
+            }
+        }
+        with patch.object(
+            ctrl,
+            "_run_devicectl",
+            side_effect=self._make_devicectl_runner(
+                installed_apps, [hostile_procs], seen_paths=seen
+            ),
+        ) as mock_run:
+            ctrl.kill(PHYS_UDID, "com.example.app")
+        assert [c for c in mock_run.call_args_list if "terminate" in c.args] == []
+
+        # Missing result in processes JSON -> safe no-op
+        with patch.object(
+            ctrl,
+            "_run_devicectl",
+            side_effect=self._make_devicectl_runner(installed_apps, [{}], seen_paths=seen),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        # Non-object JSON root raises ValueError and still unlinks temp file
+        with (
+            patch.object(
+                ctrl,
+                "_run_devicectl",
+                side_effect=self._make_devicectl_runner("[]", [], seen_paths=seen),
+            ),
+            pytest.raises(ValueError, match="JSON object"),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        # Duplicate PID in runningProcesses is deduplicated by find_physical_bundle_pids
+        from linc_nerve.core.ios_apps_logs import find_physical_bundle_pids
+
+        dup_procs = {
+            "result": {
+                "runningProcesses": [
+                    {"executable": f"{app_url}Example", "processIdentifier": 777},
+                    {"executable": f"{app_url}Example", "processIdentifier": 777},
+                ]
+            }
+        }
+        assert find_physical_bundle_pids(
+            PHYS_UDID,
+            "com.example.app",
+            run_devicectl=self._make_devicectl_runner(
+                installed_apps, [dup_procs], seen_paths=seen
+            ),
+        ) == [777]
+
+        # Exception during devicectl still unlinks temp file under scratch_dir()
+        with (
+            patch.object(
+                ctrl,
+                "_run_devicectl",
+                side_effect=self._make_devicectl_runner(RuntimeError("boom"), [], seen_paths=seen),
+            ),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            ctrl.kill(PHYS_UDID, "com.example.app")
+
+        assert len(seen) >= 5
+        for p in seen:
+            assert p.parent == custom_scratch
+            assert not p.exists()
+        assert list(custom_scratch.iterdir()) == []
 
 
 class TestIOSClearAppData:
@@ -1572,7 +1949,7 @@ def test_screenshot_uses_warm_mjpeg_when_available():
     session = MagicMock(mjpeg_port=9100)
     with (
         patch.object(ctrl, "_is_physical", return_value=False),
-        patch.object(ctrl, "_get_wda", return_value=session),
+        patch.object(ctrl._wda, "running", return_value=session),
         patch.object(ctrl._mjpeg, "screenshot", return_value=b"MJPEGPNG") as shot,
     ):
         out = ctrl.screenshot("sim-serial", full_resolution=True)
@@ -1585,7 +1962,7 @@ def test_screenshot_falls_back_to_simctl_when_mjpeg_raises():
     session = MagicMock(mjpeg_port=9100)
     with (
         patch.object(ctrl, "_is_physical", return_value=False),
-        patch.object(ctrl, "_get_wda", return_value=session),
+        patch.object(ctrl._wda, "running", return_value=session),
         patch.object(ctrl._mjpeg, "screenshot", side_effect=RuntimeError("cold")),
         patch.object(ctrl, "_screenshot_simctl", return_value=b"SIMCTLPNG") as fb,
     ):
@@ -1599,7 +1976,7 @@ def test_screenshot_skips_mjpeg_when_port_none():
     session = MagicMock(mjpeg_port=None)
     with (
         patch.object(ctrl, "_is_physical", return_value=False),
-        patch.object(ctrl, "_get_wda", return_value=session),
+        patch.object(ctrl._wda, "running", return_value=session),
         patch.object(ctrl._mjpeg, "screenshot") as shot,
         patch.object(ctrl, "_screenshot_simctl", return_value=b"SIMCTLPNG"),
     ):

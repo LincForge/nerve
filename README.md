@@ -83,8 +83,10 @@ uvx linc-nerve doctor
       hint: …
   ! linc-layout: missing directories: /home/you/.linc, /home/you/.linc/nerve/recordings — nerve creates them on first use
       hint: …
+  ! device-fleet: registry absent (/home/you/.linc/device-fleet.yaml); engagement=off; refused=0
+      hint: Create /home/you/.linc/device-fleet.yaml listing personal devices with personal: true.
 
-8 checks: 0 failed, 4 warned
+9 checks: 0 failed, 5 warned
 ```
 
 **2. Find the emulator.**
@@ -97,19 +99,19 @@ uvx linc-nerve discover
 {"devices": [{"serial": "emulator-5554", "platform": "android", "device_type": "emulator", …, "state": "online"}], "count": 1, "android": 1, "ios": 0}
 ```
 
-With several devices attached, `devices` lists all of them; pass the emulator's serial to the
-later commands.
+With several devices attached, `nerve discover` lists all of them in the `"devices"` array; pass
+the emulator's serial to the later commands.
 
 **3. Read the screen** — foreground app, element tree and a screenshot path in one call. Your
 launcher package and element count depend on the system image, and the screenshot lands in your
-temp directory (`$TMPDIR` on macOS, not `/tmp`):
+temp directory (`$TMPDIR` on macOS, not `/tmp`) as `nerve-output-<random>/<serial>_<NNNN>_<tool>.png`:
 
 ```bash
 uvx linc-nerve state --device emulator-5554
 ```
 
 ```text
-{"device": "emulator-5554", "platform": "android", "foreground": {"package": "com.google.android.apps.nexuslauncher", …}, "element_count": 31, "elements": [ … ], "screenshot": "<temp dir>/nerve-output/…png", …}
+{"device": "emulator-5554", "platform": "android", "foreground": {"package": "com.google.android.apps.nexuslauncher", …}, "element_count": 31, "elements": [ … ], "screenshot": "<temp dir>/nerve-output-<random>/emulator-5554_0001_state.png", …}
 ```
 
 **4. Give it to your agent.** For Claude Code:
@@ -125,8 +127,21 @@ Run `claude mcp list` and check that `nerve` shows as connected, then paste a fi
 
 Every MCP tool is also a CLI command: the tool name minus `nerve_`, with `_` → `-`
 (`nerve_clear_app_data` → `nerve clear-app-data`). Output is JSON on stdout; for text, put `--human`
-before the command (`nerve --human discover`, not `nerve discover --human`). Exit `0` success, `1`
-tool error, `2` usage error. `nerve schema --json` prints the full command tree.
+before the command (`nerve --human discover`, not `nerve discover --human`). `nerve --version`
+prints the installed package version, and `nerve schema --json` prints the full command tree.
+
+Note on argument style: the six hand-written CLI overrides take positional arguments
+(`nerve screenshot <serial>`, `nerve elements <serial>`, `nerve tap <serial> <x> <y>`,
+`nerve launch <serial> <package>`, `nerve kill <serial> <package>`, and zero-argument
+`nerve discover`), whereas generated tool commands take `--device <serial>` (for example,
+`nerve state --device <serial>` or `nerve logcat --device <serial>`). Run `nerve <command> --help`
+or `nerve schema --json` to inspect a command's options.
+
+| Exit code | Meaning | Error codes / examples |
+|-----------|---------|------------------------|
+| `0` | Success | Command completed, or `nerve doctor` passed with no failed checks (warnings allowed) |
+| `1` | Tool or runtime error | `TOOL_ERROR`, `DEVICE_RESERVED`, `DAEMON_UNAVAILABLE`, `UPSTREAM_TIMEOUT`, `DAEMON_ERROR`, or a failed `nerve doctor` check |
+| `2` | Usage, validation, or bad-input error | Invalid CLI flags/args (`USAGE_ERROR`), `VALIDATION_ERROR`, `UNSUPPORTED`, or unknown device serial (`DEVICE_NOT_FOUND`) |
 
 ## iOS (experimental)
 
@@ -176,7 +191,7 @@ export META_AI_API_KEY=...            # or NERVE_KEYCHAIN_SERVICE=<macOS Keychai
 | `WDA_PROJECT_DIR` | *(none)* | WebDriverAgent checkout (iOS only) |
 | `WDA_TEAM_ID` | *(none)* | Apple Developer Team ID (physical iOS only) |
 | `NERVE_HTTP_PORT` | `8111` | Port of the optional HTTP daemon: the port the daemon started by `nerve bellows` listens on and the port `nerve doctor` probes (`nerve daemon` takes `--port` instead) |
-| `LINC_NERVE_DAEMON` | `http://127.0.0.1:8111` | Daemon URL that CLI commands call before falling back to in-process |
+| `LINC_NERVE_DAEMON` | `http://127.0.0.1:8111` | Daemon URL that CLI commands call before falling back to in-process (ignored while `NERVE_ENGAGEMENT` is active, when CLI commands run in-process) |
 | `ANDROID_ADB_SERVER_PORT` / `ADB_SERVER_SOCKET` | `127.0.0.1:5037` | adb server nerve talks to (`ADB_SERVER_SOCKET` as `tcp:<port>` or `tcp:<host>:<port>` wins; loopback hosts only) — isolates nerve from the host's devices |
 | `NERVE_ALLOWED_HOSTS` / `NERVE_ALLOWED_ORIGINS` | *(none)* | Extra Hosts / browser Origins the daemon accepts |
 | `NERVE_GROUNDING` | *(off)* | `1` enables SAM 3.1 visual grounding (`nerve_ground`, `nerve_tap(prompt=...)`, `visual_grounding_hint`); needs the `[grounding]` extra |
@@ -184,6 +199,9 @@ export META_AI_API_KEY=...            # or NERVE_KEYCHAIN_SERVICE=<macOS Keychai
 | `NERVE_KEYCHAIN_SERVICE` | *(none)* | macOS Keychain service to read the Meta API key from when it is not in the environment |
 | `NERVE_OUTPUT_KEEP` | `200` | Maximum number of output files retained per process `nerve-output-*` temp directory (`0` or invalid falls back to `200`) |
 | `NERVE_OUTPUT_MAX_AGE_S` | `86400` | Maximum age in seconds (`24h` default; `0` or invalid falls back to `86400`) before an idle `nerve-output-*` directory is swept on the next process's first output |
+| `NERVE_ARTIFACTS_ROOT` | *(unset)* | Existing, writable absolute directory with no symlink in any path component, confining all recordings, outputs, action logs, transient scratch temp files, call log, and thread dumps under one private (`0700`/`0600`) root |
+| `NERVE_ENGAGEMENT` | *(off)* | Engagement identifier matching `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; when non-empty (even if invalid), requires a valid `NERVE_ARTIFACTS_ROOT` or refuses all writers with `error_category: "engagement_misconfigured"` |
+| `NERVE_ALLOW_PERSONAL_SERIALS` | *(unset)* | Comma-separated serials temporarily permitted to bypass `personal: true` in `device-fleet.yaml` while engagement mode is OFF (completely ignored when `NERVE_ENGAGEMENT` is active) |
 
 ### Output files
 
@@ -194,13 +212,60 @@ Screenshots (`nerve_screenshot`, `nerve_stream_screenshot`, `nerve_navigate_scre
 - **Stale sweep:** On the first output directory creation in a process, nerve sweeps `<temp dir>/nerve-output-*` directories owned by the current UID (never following symlinks) that no live process holds and whose newest entry is older than `NERVE_OUTPUT_MAX_AGE_S` seconds (default `86400`). Set `NERVE_OUTPUT_SWEEP=0` to disable it (it is also off under pytest unless `NERVE_OUTPUT_SWEEP=1`).
 - **On-demand cleanup:** `nerve cleanup` removes all current-UID, non-symlink `nerve-output-*` directories in the temp root except those held by a running nerve process and those modified in the last 60 seconds (`nerve cleanup --all` removes the recently modified ones too, never a live process's), printing JSON `{"removed": [...], "skipped": [...], "bytes_freed": N}` (or text with `nerve --human cleanup`).
 
+### Engagement mode and the artifacts root
+
+Set `NERVE_ARTIFACTS_ROOT=/path/to/vault` (and optionally `NERVE_ENGAGEMENT=<id>`) to keep every customer-engagement artifact under one pre-created, owner-only root instead of `~/.linc` and the system temp dir:
+
+| Artifact | Location under `$NERVE_ARTIFACTS_ROOT` | Default when unset | Mode | Notes |
+|---|---|---|---|---|
+| Recordings & extracted frames | `recordings/` | `$LINC_HOME/nerve/recordings` | Dir `0700`, frames `0600` | Android guest/emulator, iOS simulator MP4s, `nerve_extract_frames` (`out_dir` confined under root) |
+| Output spills | `output/nerve-output-*/` | `$TMPDIR/nerve-output-*/` | Dirs `0700`, files `0600` | Screenshots, `.agent.png`, state/diff/grounded captures, spilled logcat; `nerve cleanup` and stale sweep stay inside `output/` |
+| Action logs | `actionlogs/` | `$LINC_HOME/nerve/actionlogs` | Dir `0700`, JSONL `0600` | `nerve_actionlog_start` / `nerve_replay`; symlinks/`..` escapes and external `NERVE_ACTIONLOG_ROOTS` are refused |
+| Transient scratch files | `tmp/` | System `$TMPDIR` | Dir `0700`, files `0600` | Ephemeral `simctl` screenshot PNGs and `devicectl` JSON temp files (unlinked immediately) |
+| MCP call log | `mcp-calls.jsonl` | `$LINC_HOME/mcp-calls.jsonl` | File `0600` | Usage/audit log (`NERVE_USAGE_LOG`) |
+| Thread dump (optional) | `nerve_threads.txt` | `$LINC_HOME/nerve/nerve_threads.txt` | File `0600` | Written only when `NERVE_THREAD_DUMP` is set |
+
+`NERVE_ARTIFACTS_ROOT` must already exist as a writable directory (absolute path, no `..`, no control characters or trailing newlines) and must be **canonical**: no component of the path may be a symlink, leaf or ancestor. nerve compares `realpath(root)` with `normpath(root)` and refuses any mismatch, so a symlinked vault is refused however it is spelled (`/Volumes/vault-link`, `/Volumes/vault-link/`, `/Volumes/vault-link/.`, or `/Volumes/vault-link/acme`). Trailing separators on a real directory are fine (`/Volumes/vault/` is used as `/Volumes/vault`); a leading `//` is refused. This deliberately fails closed on OS-level ancestor links too: on macOS `/tmp` → `/private/tmp` and `/var` → `/private/var`, so spell such a root by its resolved path (`/private/tmp/...`). Mount points such as `/Volumes/<name>` are not symlinks and are accepted. When `NERVE_ENGAGEMENT` is non-empty (must match `[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; invalid values keep engagement enabled and fail validation), any misconfiguration fails closed with `error_category: "engagement_misconfigured"` and writes nothing to `HOME`, `LINC_HOME`, or `TMPDIR`.
+
+- **Lease housekeeping stays available:** `nerve_release` and `nerve_pool` write no engagement artifacts, so they keep working on a misconfigured engagement in a process that has already initialised its device manager (for example, the vault unmounted mid-session) and a reservation is never stranded. In a fresh, misconfigured process they are refused like every other tool, so `devices.db` is never created there.
+- **`nerve doctor`** reports a bad root as one failed `artifacts-root` check (exit 1) instead of erroring out, and `nerve doctor --fix` plans no `mkdir` while the root is misconfigured. With a valid root the check is `ok`; with neither variable set it is omitted.
+- **`NERVE_ACTIONLOG_ROOTS`** entries outside the artifacts root are dropped and logged as an `actionlog_root_outside_artifacts_root` warning (the remaining roots stay confined).
+- **Every process resolves the root from its own environment.** When `NERVE_ENGAGEMENT` is active, CLI commands run in-process under the caller's exported environment and never contact a running `:8111` daemon (daemon-only stateful tools refuse with `DAEMON_UNAVAILABLE`; use an MCP session such as `nerve bellows` under that environment instead). When `NERVE_ENGAGEMENT` is unset and only `NERVE_ARTIFACTS_ROOT` is set, CLI calls still route to a running daemon if one is listening — so either launch that daemon with `NERVE_ARTIFACTS_ROOT` in its own environment or point `LINC_NERVE_DAEMON` at an unused port so CLI calls run in-process.
+
+#### Personal devices
+
+nerve reads `$LINC_HOME/device-fleet.yaml` (reloaded automatically on mtime or size change) to separate personal hardware from shared lab/bench devices using the three engagement/fleet variables: `NERVE_ENGAGEMENT`, `NERVE_ARTIFACTS_ROOT`, and `NERVE_ALLOW_PERSONAL_SERIALS`.
+
+- **Personal devices (`personal: true`) are refused on every transport once identity is resolved:** A device is matched (case-insensitively) against the `serial`, `id`, or `hardware_id` of any entry in `$LINC_HOME/device-fleet.yaml` (top-level `devices:`, `ios:`, `garmin:`, or nested `phones:` / `watches:` sections parsed independently, duplicate keys merged, and any non-boolean-`false` `personal` value treated as personal). For mDNS Wi-Fi transports (`adb-<SERIAL>-<suffix>._adb._tcp` or `._adb-tls-connect._tcp`), nerve extracts the embedded hardware serial; for unmapped network transports such as `host:port` or `ip:port`, when `NERVE_ENGAGEMENT` is active or the registry has any `personal: true` entry, nerve resolves `ro.serialno` (cached for 30 s) before deciding. A matching `personal: true` device is refused on every transport before ADB/controller work, reservation writes, or recording starts (`error_category: "personal_device"`). Discover (`nerve_discover` / `GET /devices`) keeps listing it with `usable: false` and a `refusal` string while leaving usable devices untouched.
+- **Network transports with unknown identity are refused while personal entries exist:** When `$LINC_HOME/device-fleet.yaml` contains any `personal: true` entry (or is `unreadable` or `degraded`), any network transport whose hardware identity cannot be verified (for example, `ip:port` where `ro.serialno` is missing, placeholder, or times out) is refused fail-closed (`error_category: "personal_device"`). USB devices remain usable outside engagement mode unless matched as `personal: true`.
+- **Unreadable or degraded registry warns:** When `$LINC_HOME/device-fleet.yaml` is `unreadable` (unparseable YAML, recovery budget exceeded, non-regular file, or > 1 MiB) or `degraded` (rebuilt via line-level recovery or holding malformed entries without usable identifiers), every device decision logs a structured warning (`fleet_registry_unreadable` or `fleet_registry_degraded`), network transports are refused across all modes, and USB devices stay usable outside engagement mode.
+- **Fail-closed gating in engagement mode:** When `NERVE_ENGAGEMENT` is active (valid non-empty ID, or any invalid non-empty value which is treated as on-and-misconfigured), a device is usable **only** when `$LINC_HOME/device-fleet.yaml` is not `absent` or `unreadable` and explicitly registers one of the device's identifiers with boolean `personal: false` (network transports remain refused when `degraded`). Absent, unreadable, unregistered, unverified, and non-boolean `personal` values (`"false"`, `0`, `null`) are refused (`error_category: "engagement_misconfigured"`, or `"personal_device"` for `personal: true` / degraded network transports).
+- **`NERVE_ALLOW_PERSONAL_SERIALS` override:** Outside an engagement (`NERVE_ENGAGEMENT` unset or `""`), listing a resolved identifier in `NERVE_ALLOW_PERSONAL_SERIALS` permits temporary access to a `personal: true` device. During an engagement (`NERVE_ENGAGEMENT` set to any non-empty value), `NERVE_ALLOW_PERSONAL_SERIALS` is ignored and personal devices remain blocked.
+- **`nerve doctor`** includes a `device-fleet` check reporting the registry state (`loaded`, `degraded`, `absent`, or `unreadable`), engagement state (`off`, `on`, or `misconfigured`), and count of refused attached adb and iOS devices (warning when engagement is off and registry is absent/unreadable/degraded; failing when engagement mode cannot fail closed or is misconfigured).
+
+**Explicitly exempt (never placed inside `$NERVE_ARTIFACTS_ROOT`):**
+- **`devices.db` (`~/.local/share/linc-nerve/devices.db`, or `$LINC_HOME/.local/share/linc-nerve/devices.db` only when `LINC_HOME` is set):** Operational reservation and transport lease metadata; contains no captured UI/media data and is never initialized when engagement validation fails.
+- **WDA build caches (`~/.linc/wda/build/`, `~/.linc/wda/build-device/`, `WDA_PROJECT_DIR`):** Shared Xcode WebDriverAgent runner builds and temporary `.xctestrun` manifests stored beside the build tree rather than per-engagement artifacts.
+- **`docs_gen` (`python -m linc_nerve.docs_gen`):** Offline developer tool that updates `README.md` and `LINC.md` in the source checkout; never invoked by runtime device tools.
+
 ### HTTP daemon (optional)
 
 `nerve daemon` (or `nerve bellows`, which also serves MCP over stdio) runs an HTTP server on
 `127.0.0.1:8111`: `GET /health`, `GET /devices`, `POST /tools/<tool_name>` with a JSON body, and
 `GET /stream?device=<serial>` for a server-sent-events log stream. CLI commands use the daemon when
-one is running and otherwise run the tool in-process. A few stateful tools (recording, streaming,
-reservations, `diff`, `session-stats`) need the daemon, and say so instead of answering wrongly.
+one is running and otherwise run the tool in-process — except when `NERVE_ENGAGEMENT` is active,
+in which case CLI commands always run in-process without contacting the daemon. A few stateful tools
+(recording, streaming, reservations, `diff`, `session-stats`) need the daemon, and say so instead
+of answering wrongly.
+
+### Coexisting with scrcpy
+
+On Android, nerve's fast screenshot stream pushes its bundled `scrcpy-server-v3.3.4` binary to
+`/data/local/tmp/nerve-scrcpy-server-v3.3.4.jar` (verifying both byte size and `sha256sum`) and
+opens abstract sockets in the reserved `0x6e65xxxx` `scid` range (`localabstract:scrcpy_6e65xxxx`).
+Orphan process cleanup and `adb forward` sweeps match only that nerve-owned jar path and `scid`
+prefix, so nerve never overwrites `/data/local/tmp/scrcpy-server.jar`, kills, or unforwards an
+external `scrcpy` session (such as `scrcpy --record`) running on the same device.
 
 <!-- NERVE:TOOLS-AUTO-START — generated by `python -m linc_nerve.docs_gen`, do not edit -->
 ## MCP Tools (49)

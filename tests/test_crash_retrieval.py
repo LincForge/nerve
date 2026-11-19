@@ -1,6 +1,6 @@
 """Tests for the first-class crash-retrieval path — nerve_inspect's crash_signature.
 
-LincForge/linc-nerve#98: on mobile-agent-bench's crash-repro task (b5), agents
+On mobile-agent-bench's crash-repro task (b5), agents
 driving nerve had to hand-mine raw `nerve_logcat` output to find a crash
 signature, while mobile-mcp surfaced it directly. Investigation showed
 nerve_inspect ALREADY runs crash detection (inspect_helpers._detect_crashes)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 
 from . import android as _android
+from .timeouts import inner_budget
 
 # Package names and permission strings are interpolated directly into
 # ``adb shell`` command lines (uninstall/clear_app_data/grant_permission —
@@ -134,6 +135,9 @@ class _AppsMixin:
                     self._clear_device_failure(serial)
                     self._record_metric("install", serial, t0, success=True)
                     return
+                except TimeoutError as exc:
+                    self._record_metric("install", serial, t0, success=False, error=exc)
+                    raise
                 except _android._RETRYABLE_ERRORS as exc:
                     last_exc = exc
                     self._record_device_failure(serial)
@@ -154,11 +158,18 @@ class _AppsMixin:
 
     def _adb_install(self, serial: str, apk_path: str) -> None:
         """Invoke ``adb -s SERIAL install -r -t PATH`` and raise with full output."""
+        timeout_s = inner_budget("nerve_install")
         cmd = [_android.ADB_PATH, "-s", serial, "install", "-r", "-t", apk_path]
         try:
-            result = _android.subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = _android.subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout_s
+            )
         except _android.subprocess.TimeoutExpired as exc:
-            raise TimeoutError(f"adb install timed out after 120s: {exc}") from exc
+            raise TimeoutError(
+                f"adb install timed out after {timeout_s}s; the install may still "
+                "be completing on the device. Check nerve_apps for the package "
+                "before retrying."
+            ) from exc
 
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()

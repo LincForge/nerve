@@ -1,6 +1,6 @@
-"""Branch coverage for pre-existing functions the post-linc-ops#1138 CRAP gate flags.
+"""Branch coverage for pre-existing functions the CRAP gate flags.
 
-linc-ops#1138 made ``linc-crap-check --compare`` fail on any function absent
+The CRAP check fails on any function absent
 from ``.crap-baseline.json`` whose CRAP score is >= 30. Two untouched, long-lived
 functions sat at exactly 30.0 (complexity 5, 0% branch coverage):
 

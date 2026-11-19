@@ -69,3 +69,14 @@ def test_other_oserror_means_dead(monkeypatch) -> None:
     assert pid_alive(12345) is False
     assert device_manager._pid_alive(12345) is False
     assert adb_health._pid_alive(12345) is False
+
+
+@pytest.mark.parametrize("pid", [2**63, 2**64 + 1, 10**30])
+def test_contract_pid_beyond_pid_t_is_not_alive_and_never_raises(pid: int) -> None:
+    """[contract] a pid larger than the platform's pid_t (os.kill raises OverflowError)
+    reads as not alive, so reserve(owner_pid=...) rejects it with a validation error
+    instead of crashing."""
+    from linc_nerve.core.procs import pid_alive_same_uid
+
+    assert pid_alive(pid) is False
+    assert pid_alive_same_uid(pid) is False

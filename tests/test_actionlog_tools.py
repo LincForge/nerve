@@ -207,7 +207,7 @@ def test_bad_call_still_raises_type_error(ctrl: FakeController, tmp_path: Path) 
     path = tmp_path / "a.jsonl"
     _nerve_actionlog_start_sync("S", str(path))
     with pytest.raises(TypeError):
-        input_tools._nerve_key_sync("S", "BACK", "extra", "args")
+        input_tools._nerve_key_sync("S", "BACK", "extra", "args", "more")
     (entry,) = _entries(path)
     assert entry["ok"] is False
 
@@ -364,7 +364,13 @@ def test_mcp_wrapper_logs_exactly_once(ctrl: FakeController, tmp_path: Path) -> 
 def test_wrapper_preserves_name_and_signature() -> None:
     fn = input_tools._nerve_tap_sync
     assert fn.__name__ == "_nerve_tap_sync"
-    assert list(inspect.signature(fn).parameters) == ["device", "x", "y", "prompt"]
+    assert list(inspect.signature(fn).parameters) == [
+        "device",
+        "x",
+        "y",
+        "prompt",
+        "wait_idle_ms",
+    ]
     assert "Tap a single point" in (fn.__doc__ or "")
 
 

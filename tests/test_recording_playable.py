@@ -29,7 +29,7 @@ def test_empty_mp4_raises_with_size(tmp_path: Path) -> None:
     assert "no decodable video frames" in message
     assert f"({size} bytes)" in message
     assert str(path) in message
-    assert "scrcpy" in message
+    assert "re-recording" in message
     assert "stderr" not in message
 
 

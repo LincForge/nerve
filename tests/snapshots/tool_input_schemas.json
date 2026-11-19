@@ -418,6 +418,11 @@
         "default": "",
         "title": "Keycode",
         "type": "string"
+      },
+      "wait_idle_ms": {
+        "default": 0,
+        "title": "Wait Idle Ms",
+        "type": "integer"
       }
     },
     "required": [
@@ -474,6 +479,11 @@
         ],
         "default": null,
         "title": "Extras"
+      },
+      "activity": {
+        "default": "",
+        "title": "Activity",
+        "type": "string"
       }
     },
     "required": [
@@ -534,6 +544,11 @@
       "duration_ms": {
         "default": 500,
         "title": "Duration Ms",
+        "type": "integer"
+      },
+      "wait_idle_ms": {
+        "default": 0,
+        "title": "Wait Idle Ms",
         "type": "integer"
       }
     },
@@ -1030,6 +1045,11 @@
         ],
         "default": null,
         "title": "Y2"
+      },
+      "wait_idle_ms": {
+        "default": 0,
+        "title": "Wait Idle Ms",
+        "type": "integer"
       }
     },
     "required": [
@@ -1073,6 +1093,11 @@
         "default": "",
         "title": "Prompt",
         "type": "string"
+      },
+      "wait_idle_ms": {
+        "default": 0,
+        "title": "Wait Idle Ms",
+        "type": "integer"
       }
     },
     "required": [
@@ -1096,6 +1121,11 @@
         "default": false,
         "title": "Secret",
         "type": "boolean"
+      },
+      "wait_idle_ms": {
+        "default": 0,
+        "title": "Wait Idle Ms",
+        "type": "integer"
       }
     },
     "required": [

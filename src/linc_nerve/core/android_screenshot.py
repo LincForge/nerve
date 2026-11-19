@@ -13,7 +13,7 @@ from typing import Any
 
 from . import android as _android
 
-# Inline MCP image-content size budget (linc-nerve#97): the caller-visible
+# Inline MCP image-content size budget: the caller-visible
 # base64 payload must stay under this so nerve_screenshot's inline
 # ImageContent block never blows the MCP result cap. 768 KiB.
 _INLINE_MAX_B64_BYTES = 768 * 1024

@@ -35,7 +35,7 @@ class UiHierarchyUnavailableError(DeviceError):
     process — a leaked instrumentation driver — holds the device's single
     UiAutomation connection). Callers must surface this as an error, never
     as `element_count: 0`; a benchmark run showed the silent-empty fallback
-    forced agents into screenshot-only vision (reactor 8bba730a/280bbee7).
+    forced agents into screenshot-only vision.
     """
 
 
@@ -49,6 +49,8 @@ class NerveDevice:
     model: str = ""
     os_version: str = ""
     state: str = "online"
+    hardware_serial: str = ""
+    aliases: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""

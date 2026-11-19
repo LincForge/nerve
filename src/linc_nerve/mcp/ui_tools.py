@@ -140,7 +140,7 @@ def _collect_android_state(
         # Never report element_count: 0 for a failed dump — an agent reads
         # that as "empty screen" and falls back to screenshot-only vision
         # (reactor 8bba730a). The screenshot below still ships.
-        state["elements_error"] = str(exc)
+        state["elements_error"] = str(exc)[:300]
 
     try:
         data = android.screenshot(device)
@@ -150,7 +150,8 @@ def _collect_android_state(
             changes["screenshot"] = changed
             state["hamming_distance"] = distance
         return data
-    except Exception:
+    except Exception as exc:
+        state["screenshot_error"] = str(exc)[:300]
         return None
 
 
@@ -161,6 +162,9 @@ def _collect_ios_state(
     session: Any | None,
     changes: dict[str, bool],
 ) -> bytes | None:
+    state["elements_error"] = (
+        "element tree not collected by nerve_state on iOS; call nerve_elements"
+    )
     try:
         data = ios.screenshot(device)
         state["screenshot_size"] = len(data)
@@ -169,7 +173,8 @@ def _collect_ios_state(
             changes["screenshot"] = changed
             state["hamming_distance"] = distance
         return data
-    except Exception:
+    except Exception as exc:
+        state["screenshot_error"] = str(exc)[:300]
         return None
 
 
@@ -197,9 +202,8 @@ def _nerve_state_sync(device: str, track_changes: bool = False) -> Any:
         track_changes: Include change tracking info.
 
     Returns:
-        state dict with elements + screenshot path + foreground. If the tree
-        could not be dumped, the dict carries ``elements_error`` INSTEAD of
-        elements/element_count — "tree unavailable", never "empty screen".
+        state dict with elements + screenshot path + foreground; carries
+        ``elements_error`` or ``screenshot_error`` instead when unavailable.
     """
     android, ios = _core._ensure_initialized()
     dev, platform = _core._resolve_device(device)
@@ -224,9 +228,10 @@ def _nerve_state_sync(device: str, track_changes: bool = False) -> Any:
         state["changes"] = changes
 
     if screenshot_bytes is not None:
+        from linc_nerve.core.engagement import write_private_bytes
+
         path = _core._next_output_path(device, "state")
-        with open(path, "wb") as f:
-            f.write(screenshot_bytes)
+        write_private_bytes(path, screenshot_bytes)
         state["screenshot"] = path
         state.update(_core._screenshot_geometry(screenshot_bytes, state.get("screen_size", {})))
 
@@ -318,9 +323,10 @@ def _nerve_diff_sync(device: str) -> Any:
     result["frames_since_change"] = session.frames_since_change
 
     if screenshot_bytes is not None:
+        from linc_nerve.core.engagement import write_private_bytes
+
         path = _core._next_output_path(device, "diff")
-        with open(path, "wb") as f:
-            f.write(screenshot_bytes)
+        write_private_bytes(path, screenshot_bytes)
         result["screenshot"] = path
 
     return result
@@ -384,10 +390,11 @@ def _nerve_ground_sync(
         if screen_size:
             out["screen_size"] = screen_size
         if annotate:
+            from linc_nerve.core.engagement import write_private_bytes
+
             overlay_bytes = render_grounded_overlay(png_bytes, targets, screen_size=screen_size)
             path = _core._next_output_path(device, "grounded")
-            with open(path, "wb") as f:
-                f.write(overlay_bytes)
+            write_private_bytes(path, overlay_bytes)
             out["screenshot"] = path
             out[_core._INLINE_IMAGE_KEY] = overlay_bytes
         return out

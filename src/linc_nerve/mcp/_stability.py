@@ -9,7 +9,7 @@ to keep both files under the 400-line advisory. Consumed by
 
 from __future__ import annotations
 
-import time
+import time  # noqa: F401
 from typing import Any
 
 
@@ -35,22 +35,12 @@ def _poll_stability(
     use_pil: bool,
 ) -> dict[str, Any]:
     """Wait for UI to stabilize, falling back to fixed sleep on failure."""
-    try:
-        from linc_nerve.core.state_engine import wait_for_stable_ui
+    from linc_nerve.core.state_engine import wait_for_idle
 
-        if use_pil:
-            return wait_for_stable_ui(
-                lambda: ctrl.screenshot_pil(device),
-                timeout_ms=settle_ms,
-                pil_mode=True,
-            )
-        return wait_for_stable_ui(
-            lambda: ctrl.screenshot(device),
-            timeout_ms=settle_ms,
-        )
-    except Exception:
-        time.sleep(settle_ms / 1000.0)
-        return {"stable": False, "elapsed_ms": settle_ms, "polls": 0}
+    screenshot_fn = (
+        (lambda: ctrl.screenshot_pil(device)) if use_pil else (lambda: ctrl.screenshot(device))
+    )
+    return wait_for_idle(screenshot_fn, settle_ms, pil_mode=use_pil)
 
 
 def _resolve_screenshot_data(
@@ -122,6 +112,7 @@ def _build_nav_screenshot_result(
         "stable": stability.get("stable", False),
         "stability_ms": stability.get("elapsed_ms", 0),
         "stability_polls": stability.get("polls", 0),
+        "stability_reason": stability.get("reason", ""),
     }
     if annotate and elements is not None:
         result["elements"] = elements

@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from linc_nerve.core import action_log, observability, replay
+from linc_nerve.core import action_log, replay
 from linc_nerve.mcp import _core
 from linc_nerve.mcp._core import device_tool
 
@@ -115,14 +115,19 @@ def _nerve_actionlog_start_sync(
         Dict with success/serial/path/started_at (plus guarded/
         allowed_packages when guarded), or {"error": ...}.
     """
+    from linc_nerve.core import engagement
+
+    refusal = _core._device_policy_refusal(device, allow_discover=False)
+    if refusal is not None:
+        return refusal
+
     roots = action_log.actionlog_roots(_environ)
     resolved = action_log.resolve_log_path(path, roots)
     if isinstance(resolved, str):
         return _validation_error(resolved)
-    default_root = observability.linc_home() / "nerve" / "actionlogs"
-    if default_root in roots and not default_root.exists():
-        default_root.mkdir(parents=True, exist_ok=True)
-        default_root.chmod(0o700)
+    default_root = engagement.actionlogs_dir(_environ)
+    if default_root in roots:
+        engagement.ensure_private_dir(default_root, 0o700)
     meta = _parse_meta(meta_json)
     if meta is None:
         return _validation_error("meta_json must be a JSON object string")

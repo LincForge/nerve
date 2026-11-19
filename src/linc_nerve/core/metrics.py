@@ -179,7 +179,8 @@ class MetricsCollector:
     def recent(self, n: int = 20, serial: str | None = None) -> list[dict]:
         """Return the last n metrics, optionally restricted to one device."""
         with self._lock:
-            items = _filter_by_serial(list(self._buffer), serial)[-n:]
+            filtered = _filter_by_serial(list(self._buffer), serial)
+        items = filtered[max(0, len(filtered) - max(0, n)) :]
 
         return [
             {

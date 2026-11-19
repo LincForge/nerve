@@ -96,7 +96,7 @@ def test_route_health() -> None:
 
 
 def test_route_health_body_shape_is_exact() -> None:
-    """Body has exactly {ok, version, uptime_seconds, git_sha, package_version}.
+    """Body has exactly {ok, version, uptime_seconds, git_sha, package_version, adb, wda}.
 
     Per council Lattner P0 — absence of `devices`, `device_count`, etc. is
     the contract; presence-only assertions don't enforce the break. `git_sha`
@@ -112,8 +112,36 @@ def test_route_health_body_shape_is_exact() -> None:
         "git_sha",
         "package_version",
         "adb",
+        "wda",
     }
     assert isinstance(result["body"]["adb"]["lost_after_recovery"], list)
+
+
+def test_route_health_wda_booleans_and_no_secret_leak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GET /health reports pure in-memory WDA booleans without leaking env values."""
+    import json
+
+    monkeypatch.setenv("WDA_PROJECT_DIR", "/tmp/secret-wda")
+    monkeypatch.setenv("WDA_TEAM_ID", "TEAMSECRET")
+    result = route_request(method="GET", path="/health", body={}, registry={})
+    assert result["status"] == 200
+    body = result["body"]
+    assert body["wda"] == {"project_configured": True, "team_id_configured": True}
+    dumped = json.dumps(body)
+    assert "secret-wda" not in dumped
+    assert "TEAMSECRET" not in dumped
+
+    monkeypatch.delenv("WDA_PROJECT_DIR", raising=False)
+    monkeypatch.delenv("WDA_TEAM_ID", raising=False)
+    unset_body = route_request(method="GET", path="/health", body={}, registry={})["body"]
+    assert unset_body["wda"] == {"project_configured": False, "team_id_configured": False}
+
+    monkeypatch.setenv("WDA_PROJECT_DIR", "   ")
+    monkeypatch.setenv("WDA_TEAM_ID", "\t\n ")
+    blank_body = route_request(method="GET", path="/health", body={}, registry={})["body"]
+    assert blank_body["wda"] == {"project_configured": False, "team_id_configured": False}
 
 
 def test_build_health_includes_git_sha() -> None:

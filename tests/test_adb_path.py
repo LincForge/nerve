@@ -18,6 +18,12 @@ from typing import Any
 
 import pytest
 
+# conftest's autouse Xcode fixture imports ios_discovery, which only resolves its
+# ios <-> ios_discovery cycle when ios is imported first. This file imports nerve
+# lazily inside each test, so run on its own (e.g. in a mutation sandbox) it would
+# otherwise hit the cycle during fixture setup.
+import linc_nerve.core.ios  # noqa: F401
+
 
 def test_resolve_adb_path_prefers_shutil_which(monkeypatch: pytest.MonkeyPatch) -> None:
     """If `shutil.which` returns a path, use it directly — no further search."""
@@ -175,6 +181,25 @@ def test_resolve_emulator_path_honors_android_sdk_root(
     )
 
     assert adb_path.resolve_emulator_path() == str(fake_emulator)
+
+
+def test_resolve_emulator_path_prefers_android_sdk_root_over_android_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With both env vars set and both binaries executable, ANDROID_SDK_ROOT wins."""
+    from linc_nerve.core import adb_path
+
+    sdk_emulator = tmp_path / "sdk" / "emulator" / "emulator"
+    home_emulator = tmp_path / "home-sdk" / "emulator" / "emulator"
+
+    monkeypatch.setattr(adb_path.shutil, "which", lambda name: None)
+    monkeypatch.setenv("ANDROID_SDK_ROOT", str(tmp_path / "sdk"))
+    monkeypatch.setenv("ANDROID_HOME", str(tmp_path / "home-sdk"))
+    monkeypatch.setattr(
+        adb_path, "_is_executable_file", lambda p: p in (sdk_emulator, home_emulator)
+    )
+
+    assert adb_path.resolve_emulator_path() == str(sdk_emulator)
 
 
 def test_resolve_emulator_path_honors_android_home(

@@ -77,6 +77,7 @@ def _nerve_launch_sync(
     package: str,
     uri: str = "",
     extras: dict[str, Any] | None = None,
+    activity: str = "",
 ) -> dict[str, Any]:
     """Launch an app by package/bundle ID, optionally opening a deep link URI.
 
@@ -95,6 +96,10 @@ def _nerve_launch_sync(
              type-dispatched into am-start flags: bool -> --ez, int -> --ei, str -> --es.
              Lets consent-gated apps run unattended BVTs without a manual am-start priming
              step. iOS support is platform-dependent — see core/ios.py launch().
+        activity: Optional Android activity to start (fully qualified, e.g.
+             "com.example.app.MainActivity"). Required when the package has more
+             than one launcher activity (a debug build with a second launcher), which
+             otherwise fails with "has N launcher activities". Ignored with uri and on iOS.
     """
     if uri:
         try:
@@ -112,12 +117,29 @@ def _nerve_launch_sync(
 
     ctrl = _core._get_controller(platform)
     try:
-        ctrl.launch(device, package, uri=uri, extras=extras)
+        _launch_on(ctrl, device, package, uri, extras, activity)
         if _core._metrics is not None:
             _core._metrics.record_launch(device)
-        return _launch_result(package, uri, extras)
+        return _with_activity(_launch_result(package, uri, extras), activity)
     except Exception as exc:
         return {"error": f"Launch failed: {exc}"}
+
+
+def _launch_on(
+    ctrl: Any, device: str, package: str, uri: str, extras: dict[str, Any] | None, activity: str
+) -> None:
+    """Call ``ctrl.launch``, passing ``activity`` only when one was given."""
+    if activity:
+        ctrl.launch(device, package, activity=activity, uri=uri, extras=extras)
+    else:
+        ctrl.launch(device, package, uri=uri, extras=extras)
+
+
+def _with_activity(result: dict[str, Any], activity: str) -> dict[str, Any]:
+    """Echo ``activity`` in the launch result when one was given."""
+    if activity:
+        result["activity"] = activity
+    return result
 
 
 def _launch_result(package: str, uri: str, extras: dict[str, Any] | None) -> dict[str, Any]:

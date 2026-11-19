@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import struct
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -12,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PIL import Image
 
+from linc_nerve.core.adb_path import ADB_PATH
 from linc_nerve.core.scrcpy import (
     _SCRCPY_CB_COOLDOWN,
     _SCRCPY_CB_THRESHOLD,
@@ -23,6 +25,23 @@ from linc_nerve.core.scrcpy import (
     _recv_exact_into,
     server_available,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_adb_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer every unpatched adb ``subprocess.run`` (teardown ``forward --remove``,
+    the orphan-forward sweep's ``forward --list``) with an empty success instead
+    of spawning the real binary — on a host with adb installed those calls start
+    a real adb server that outlives the test run. Tests that patch
+    ``subprocess.run`` themselves still take precedence inside their scope."""
+    real_run = subprocess.run
+
+    def run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == ADB_PATH:
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
 
 
 @pytest.fixture(autouse=True)
@@ -133,21 +152,28 @@ class TestScrcpyStream:
     def test_ensure_server_pushed_skips_if_same_size(
         self, mock_popen: MagicMock, mock_run: MagicMock, tmp_path: Path
     ) -> None:
+        import hashlib
+
         # Create a fake server binary
+        payload = b"fake_server_data_1234"
         server_file = tmp_path / f"scrcpy-server-v{SCRCPY_VERSION}"
-        server_file.write_bytes(b"fake_server_data_1234")
+        server_file.write_bytes(payload)
         file_size = server_file.stat().st_size
+        file_sha = hashlib.sha256(payload).hexdigest()
 
         with patch("linc_nerve.core.scrcpy._SERVER_DIR", tmp_path):
             stream = ScrcpyStream("DEV1", port=12345)
-            # Mock wc -c returning same size
-            mock_run.return_value = MagicMock(stdout=str(file_size), returncode=0)
+            # Mock wc -c returning same size and sha256sum returning matching sha256
+            mock_run.side_effect = [
+                MagicMock(stdout=str(file_size), returncode=0),
+                MagicMock(stdout=file_sha, returncode=0),
+            ]
             stream._ensure_server_pushed()
 
-        # Should only have called the size check, not push
-        assert mock_run.call_count == 1
-        args = mock_run.call_args[0][0]
-        assert "wc" in " ".join(args)
+        # Should have called size check + sha256 check, not push
+        assert mock_run.call_count == 2
+        assert "wc" in " ".join(mock_run.call_args_list[0][0][0])
+        assert "sha256sum" in " ".join(mock_run.call_args_list[1][0][0])
 
     @patch("subprocess.run")
     def test_ensure_server_pushed_pushes_if_different_size(
@@ -806,9 +832,9 @@ class TestOrphanForwardSweep:
     def test_removes_only_scrcpy_forwards(self) -> None:
         removed: list[tuple[str, str]] = []
         listing = (
-            "PIX8 tcp:27183 localabstract:scrcpy_00027183\n"
+            "PIX8 tcp:27183 localabstract:scrcpy_6e656a2f\n"
             "PIX8 tcp:8081 tcp:8081\n"
-            "WATCH tcp:31000 localabstract:scrcpy_00031000\n"
+            "WATCH tcp:31000 localabstract:scrcpy_6e657918\n"
         )
         with patch(
             "linc_nerve.core.scrcpy.subprocess.run",

@@ -84,6 +84,34 @@ def _nerve_record_stop_sync(device: str) -> dict[str, Any]:
     return {"status": "success", "file_path": path, **_recording_extras(dev, device)}
 
 
+def _validate_record_fixed_duration(duration_seconds: Any) -> dict[str, Any] | None:
+    """Return a validation error dict if *duration_seconds* is not an int in 1..120."""
+    if (
+        isinstance(duration_seconds, bool)
+        or not isinstance(duration_seconds, int)
+        or not (1 <= duration_seconds <= 120)
+    ):
+        return {
+            "error": "duration_seconds must be an integer from 1 to 120",
+            "validation_error": True,
+        }
+    return None
+
+
+def _record_fixed(device: str, duration_seconds: int) -> dict[str, Any]:
+    """Validate *duration_seconds*, then record a fixed-duration clip on *device*."""
+    err = _validate_record_fixed_duration(duration_seconds)
+    if err is not None:
+        return err
+    dev = get_device_sync(device)
+    dev.start_recording(device)
+    action_log.REGISTRY.mark_recording_started(device, action_log._clock())
+    time.sleep(duration_seconds)
+    path = dev.stop_recording(device)
+    action_log.REGISTRY.mark_recording_stopped(device)
+    return {"status": "success", "file_path": path, **_recording_extras(dev, device)}
+
+
 @device_tool
 def _nerve_record_fixed_sync(device: str, duration_seconds: int = 15) -> dict[str, Any]:
     """Record a fixed-length screen video — self-terminating MP4 capture.
@@ -106,13 +134,7 @@ def _nerve_record_fixed_sync(device: str, duration_seconds: int = 15) -> dict[st
     Returns:
         dict with status="success" and file_path (host MP4) — or error.
     """
-    dev = get_device_sync(device)
-    dev.start_recording(device)
-    action_log.REGISTRY.mark_recording_started(device, action_log._clock())
-    time.sleep(duration_seconds)
-    path = dev.stop_recording(device)
-    action_log.REGISTRY.mark_recording_stopped(device)
-    return {"status": "success", "file_path": path, **_recording_extras(dev, device)}
+    return _record_fixed(device, duration_seconds)
 
 
 @global_tool

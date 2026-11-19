@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import structlog
 
+from .adb_health import adb_server_config_error
 from .adb_path import ADB_PATH, describe_emulator_probe_locations, resolve_emulator_path
 
 logger = structlog.get_logger().bind(domain="device_control")
@@ -35,6 +36,32 @@ _PORT_MIN = 5554
 _PORT_MAX = 5600
 
 
+class AdbServerRefusedError(ValueError, RuntimeError):
+    """An emulator operation needs adb while ADB_SERVER_SOCKET /
+    ANDROID_ADB_SERVER_PORT is refused or malformed."""
+
+
+def _require_adb_server_allowed(action: str) -> None:
+    """Raise naming the refused variable before any adb argv is spawned."""
+    refused = adb_server_config_error()
+    if refused is not None:
+        raise AdbServerRefusedError(f"Cannot {action}: {refused}")
+
+
+def _guard_adb_command(cmd: list[str]) -> None:
+    """Refuse an adb argv while the configured adb server is refused."""
+    if cmd and cmd[0] == ADB_PATH:
+        _require_adb_server_allowed("run adb command")
+
+
+def _apply_refused_dict_fields(d: dict, refused: str | None) -> dict:
+    """Mark a serialized AVD not running and carry the refusal reason."""
+    if refused is not None:
+        d["running"] = False
+        d["adb_refused"] = refused
+    return d
+
+
 @dataclass
 class EmulatorInfo:
     """Information about an Android emulator (AVD)."""
@@ -45,6 +72,7 @@ class EmulatorInfo:
     state: str = "stopped"  # "stopped" | "booting" | "running"
     api_level: str = ""  # from AVD config if available
     started_at: float | None = None
+    adb_refused: str | None = None  # why adb was not consulted (refused server env)
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -60,7 +88,14 @@ class EmulatorInfo:
             d["api_level"] = self.api_level
         if self.started_at is not None:
             d["started_at"] = self.started_at
-        return d
+        return _apply_refused_dict_fields(d, self.adb_refused)
+
+
+def _tag_adb_refused(infos: list[EmulatorInfo], refused: str | None) -> list[EmulatorInfo]:
+    """Stamp every listed AVD with the adb refusal reason (``None`` when fine)."""
+    for info in infos:
+        info.adb_refused = refused
+    return infos
 
 
 class EmulatorManager:
@@ -76,6 +111,7 @@ class EmulatorManager:
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         """Run a subprocess with timeout and return result."""
+        _guard_adb_command(cmd)
         return subprocess.run(
             cmd,
             capture_output=True,
@@ -159,10 +195,18 @@ class EmulatorManager:
             pass
         return running
 
+    def _running_unless_refused(self, refused: str | None) -> dict[str, str]:
+        """Running AVDs from ``adb devices`` — or ``{}`` without spawning adb
+        when the configured adb server is refused."""
+        if refused is not None:
+            return {}
+        return self._get_running_emulators()
+
     def list_avds(self) -> list[EmulatorInfo]:
         """List all available AVDs and their running state."""
+        refused = adb_server_config_error()
         avd_names = self._get_installed_avds()
-        running = self._get_running_emulators()
+        running = self._running_unless_refused(refused)
 
         # Build combined list
         infos: list[EmulatorInfo] = []
@@ -198,7 +242,7 @@ class EmulatorManager:
                     )
                 )
 
-        return infos
+        return _tag_adb_refused(infos, refused)
 
     def _preflight_checks(self, avd_name: str) -> EmulatorInfo | int:
         """Validate AVD exists and allocate a port.
@@ -325,7 +369,9 @@ class EmulatorManager:
         Raises:
             ValueError: If the AVD does not exist.
             TimeoutError: If the emulator does not boot within timeout.
+            AdbServerRefusedError: If the configured adb server is refused.
         """
+        _require_adb_server_allowed(f"start emulator '{avd_name}'")
         result = self._preflight_checks(avd_name)
         if isinstance(result, EmulatorInfo):
             return result
@@ -359,7 +405,11 @@ class EmulatorManager:
 
         Returns:
             True if the emulator was stopped successfully.
+
+        Raises:
+            AdbServerRefusedError: If the configured adb server is refused.
         """
+        _require_adb_server_allowed(f"stop emulator '{serial}'")
         if not serial.startswith("emulator-"):
             logger.warning("stop_not_emulator", serial=serial)
             return False

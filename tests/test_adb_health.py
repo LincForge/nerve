@@ -16,6 +16,10 @@ from typing import Any
 
 import pytest
 
+# conftest's autouse Xcode fixture imports ios_discovery, which only resolves its
+# ios <-> ios_discovery cycle when ios is imported first; this file alone imports
+# nothing that pulls ios in, so run on its own it would hit the cycle in setup.
+import linc_nerve.core.ios  # noqa: F401
 from linc_nerve.core import adb_health
 from linc_nerve.core.adb_health import AdbTransportStatus
 
@@ -90,17 +94,17 @@ def test_count_ready_devices_ignores_daemon_startup_chatter() -> None:
 
 def test_parse_adb_devices_keeps_a_spaced_mdns_serial_intact() -> None:
     """An mDNS wifi-adb name can carry a collision suffix with a space
-    (`adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp`) — adb separates serial
+    (`adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp`) — adb separates serial
     and state with a TAB, so splitting on ANY whitespace mangles it."""
     out = (
         "List of devices attached\n"
         "R3CFAKE00001\tdevice\n"
-        "adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp\tdevice\n"
+        "adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp\tdevice\n"
         "\n"
     )
     assert adb_health.parse_adb_devices(out) == (
         "R3CFAKE00001",
-        "adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp",
+        "adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp",
     )
 
 
@@ -108,7 +112,7 @@ def test_parse_adb_devices_excludes_a_spaced_mdns_serial_when_offline() -> None:
     out = (
         "List of devices attached\n"
         "R3CFAKE00001\tdevice\n"
-        "adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp\toffline\n"
+        "adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp\toffline\n"
     )
     assert adb_health.parse_adb_devices(out) == ("R3CFAKE00001",)
     assert adb_health.count_ready_devices(out) == 1
@@ -122,9 +126,9 @@ def test_parse_adb_devices_pin_tab_less_line_still_parses() -> None:
 
 
 def test_split_adb_device_line_keeps_the_spaced_serial_and_state() -> None:
-    line = "adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp\tdevice"
+    line = "adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp\tdevice"
     assert adb_health.split_adb_device_line(line) == (
-        "adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp",
+        "adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp",
         "device",
     )
 
@@ -137,11 +141,41 @@ def test_split_adb_device_line_returns_none_for_a_single_token() -> None:
     assert adb_health.split_adb_device_line("R3C") is None
 
 
+def test_split_adb_device_line_splits_on_the_last_tab_only() -> None:
+    assert adb_health.split_adb_device_line("FAKE\tSERIAL01\tdevice") == (
+        "FAKE\tSERIAL01",
+        "device",
+    )
+
+
+def test_split_adb_device_line_strips_padding_around_the_tab() -> None:
+    assert adb_health.split_adb_device_line("  FAKESERIAL01 \t offline  ") == (
+        "FAKESERIAL01",
+        "offline",
+    )
+
+
+def test_split_adb_device_line_keeps_a_spaced_state_after_the_tab() -> None:
+    """adb's ``no permissions (...)`` state contains spaces — only the tab split
+    keeps it whole."""
+    assert adb_health.split_adb_device_line("FAKESERIAL01\tno permissions") == (
+        "FAKESERIAL01",
+        "no permissions",
+    )
+
+
+def test_split_adb_device_line_tab_less_fallback_keeps_a_spaced_serial() -> None:
+    assert adb_health.split_adb_device_line("adb-FAKESERIAL01-x (2)  device") == (
+        "adb-FAKESERIAL01-x (2)",
+        "device",
+    )
+
+
 def test_probe_transport_records_the_full_spaced_serial(monkeypatch: pytest.MonkeyPatch) -> None:
     out = (
         "List of devices attached\n"
         "R3CFAKE00001\tdevice\n"
-        "adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp\tdevice\n"
+        "adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp\tdevice\n"
     )
     monkeypatch.setattr(adb_health, "_run", lambda argv, timeout: _FakeCompleted(out))
     monkeypatch.setattr(adb_health, "find_adb_server_pid", lambda: 4242)
@@ -149,7 +183,7 @@ def test_probe_transport_records_the_full_spaced_serial(monkeypatch: pytest.Monk
 
     status = adb_health.probe_transport()
 
-    assert "adb-RFAT629KQ9A-x (2)._adb-tls-connect._tcp" in status.adb_serials
+    assert "adb-FAKESERIAL01-x (2)._adb-tls-connect._tcp" in status.adb_serials
     assert status.device_count == 2
 
 
@@ -201,7 +235,15 @@ def test_is_network_serial_false_for_a_usb_serial() -> None:
 
 def test_is_network_serial_false_for_an_mdns_service_name() -> None:
     """mDNS `_adb-tls-connect` names are not reconnectable via `adb connect`."""
-    assert adb_health.is_network_serial("adb-RFAT629KQ9A-abc._adb-tls-connect._tcp") is False
+    assert adb_health.is_network_serial("adb-FAKESERIAL01-abc._adb-tls-connect._tcp") is False
+
+
+@pytest.mark.parametrize(
+    "serial",
+    ["192.0.2.10:35593\n", " 192.0.2.10:35593", "192.0.2.10:", "192.0.2:35593", ""],
+)
+def test_is_network_serial_false_for_a_malformed_ip_port(serial: str) -> None:
+    assert adb_health.is_network_serial(serial) is False
 
 
 # ---------------------------------------------------------------------------

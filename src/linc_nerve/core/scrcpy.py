@@ -8,6 +8,8 @@ for screencap.
 from __future__ import annotations
 
 import contextlib
+import functools
+import hashlib
 import io
 import socket
 import subprocess
@@ -18,6 +20,7 @@ from pathlib import Path
 import structlog
 from PIL import Image
 
+from .adb_health import adb_server_config_error
 from .adb_path import ADB_PATH
 
 logger = structlog.get_logger().bind(domain="device_control")
@@ -28,7 +31,33 @@ SCRCPY_VERSION = "3.3.4"
 # Default server binary location (bundled with linc-nerve)
 _SERVER_DIR = Path(__file__).parent.parent / "vendor"
 _SERVER_FILENAME = f"scrcpy-server-v{SCRCPY_VERSION}"
-_DEVICE_PATH = "/data/local/tmp/scrcpy-server.jar"
+_DEVICE_PATH = f"/data/local/tmp/nerve-scrcpy-server-v{SCRCPY_VERSION}.jar"
+
+# Reserved 31-bit scid high half ("ne" = 0x6e65) so nerve's abstract sockets
+# (localabstract:scrcpy_6e65xxxx) never collide with upstream scrcpy sessions.
+_NERVE_SCID_PREFIX = 0x6E650000
+_NERVE_SCID_PORT_MASK = 0xFFFF
+
+
+def _format_scid(scid: int) -> str:
+    """Format a 31-bit scrcpy scid as 8 lowercase hex digits."""
+    return f"{scid:08x}"
+
+
+def nerve_scid(port: int) -> int:
+    """Return a 31-bit scrcpy session id in nerve's reserved 0x6e65xxxx range."""
+    return _NERVE_SCID_PREFIX | (port & _NERVE_SCID_PORT_MASK)
+
+
+def scid_socket_name(scid: int) -> str:
+    """Return the adb forward remote spec for ``scid`` (``localabstract:scrcpy_%08x``)."""
+    return f"localabstract:scrcpy_{_format_scid(scid)}"
+
+
+@functools.cache
+def _vendored_server_sha256(server_path: Path) -> str:
+    """Return the lowercase hex SHA-256 of the vendored scrcpy-server binary."""
+    return hashlib.sha256(server_path.read_bytes()).hexdigest()
 
 # Connection defaults
 _BASE_PORT = 27183
@@ -36,8 +65,7 @@ _CONNECT_TIMEOUT = 5.0  # seconds to wait for server startup
 # Seconds to wait for the stream's first decoded keyframe before declaring it a
 # 0-frame stream. Kept well under android.py's 15s screenshot hard-timeout so a
 # stuck stream falls back to screencap fast instead of burning the whole budget
-# (a 0-frame stream + restart could otherwise stack two 15s timeouts — see
-# reactor e0262e7c / inbox 351a08d6).
+# (a 0-frame stream + restart could otherwise stack two 15s timeouts).
 _KEYFRAME_TIMEOUT = 3.0
 _CONNECT_RETRY_INTERVAL = 0.05  # seconds between connection attempts
 _MAX_SIZE = 1080  # max dimension for captured frames
@@ -103,6 +131,19 @@ def _recv_exact_into(sock: socket.socket, n: int, buf: bytearray) -> bytes:
 # Imported after the patched module-globals above are defined; the mixin
 # resolves them through this module at call-time (see scrcpy_stream_server.py).
 from .scrcpy_stream_server import _StreamServerMixin  # noqa: E402
+
+
+def _remove_adb_forward(serial: str, port: int) -> None:
+    """Best-effort ``adb forward --remove`` — skipped (no adb spawn) while the
+    configured adb server is refused (ADB_SERVER_SOCKET / ANDROID_ADB_SERVER_PORT)."""
+    if adb_server_config_error() is not None:
+        return
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):  # incl. FileNotFoundError
+        subprocess.run(
+            [ADB_PATH, "-s", serial, "forward", "--remove", f"tcp:{port}"],
+            capture_output=True,
+            timeout=5,
+        )
 
 
 class ScrcpyStream(_StreamServerMixin):
@@ -225,12 +266,7 @@ class ScrcpyStream(_StreamServerMixin):
             except (OSError, subprocess.TimeoutExpired):
                 pass
             self._server_proc = None
-        with contextlib.suppress(subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            subprocess.run(
-                [ADB_PATH, "-s", self.serial, "forward", "--remove", f"tcp:{self._port}"],
-                capture_output=True,
-                timeout=5,
-            )
+        _remove_adb_forward(self.serial, self._port)
 
     def stop(self) -> None:
         """Stop the stream and clean up resources."""
@@ -339,5 +375,7 @@ __all__ = [
     "_allocate_port",
     "_recv_exact",
     "_recv_exact_into",
+    "nerve_scid",
+    "scid_socket_name",
     "server_available",
 ]

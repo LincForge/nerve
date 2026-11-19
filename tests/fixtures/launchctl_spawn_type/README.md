@@ -2,7 +2,7 @@
 
 The `spawn type = <word> (<n>)` line from `launchctl print gui/$UID/<label>`,
 for `parse_loaded_job` / `reload_reasons` in `scripts/post_merge_kickstart.py`
-(linc-nerve-o4w7). All are real captures from the Mac mini (macOS 26.6.2) on
+(linc-nerve-o4w7). All are real captures from a macOS 26.6.2 bench host on
 2026-10-05, taken from the scratch job `com.linc.nerve-ptest` while it was
 loaded with each plist `ProcessType`:
 

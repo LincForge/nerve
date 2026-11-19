@@ -91,8 +91,6 @@ from typing import IO, Any, cast
 
 import structlog
 
-from linc_nerve.core import observability
-
 log = structlog.get_logger().bind(domain="action_log")
 
 HEADER_VERSION = 1
@@ -314,22 +312,41 @@ def _to_line(record: dict[str, Any]) -> str:
     return json.dumps(record, default=str, ensure_ascii=False) + "\n"
 
 
+def _env_actionlog_roots(raw: str, art_root: Path | None) -> list[Path]:
+    """Parse NERVE_ACTIONLOG_ROOTS; entries outside *art_root* are dropped with a warning."""
+    from linc_nerve.core import engagement
+
+    roots: list[Path] = []
+    dropped: list[str] = []
+    for part in (p.strip() for p in raw.split(os.pathsep)):
+        path = Path(part).expanduser()
+        if not part or not path.is_absolute():
+            continue
+        if art_root is not None and not engagement.is_within_root(path, art_root):
+            dropped.append(str(path))
+            continue
+        roots.append(path)
+    if dropped:
+        log.warning(
+            "actionlog_root_outside_artifacts_root",
+            dropped=dropped,
+            artifacts_root=str(art_root),
+        )
+    return roots
+
+
 def actionlog_roots(environ: Mapping[str, str] | None = None) -> list[Path]:
-    """Allowed host directories for action logs from NERVE_ACTIONLOG_ROOTS or default LINC_HOME."""
+    """Allowed host directories for action logs from NERVE_ACTIONLOG_ROOTS or default root."""
+    from linc_nerve.core import engagement
+
     env = os.environ if environ is None else environ
+    art_root = engagement.artifacts_root(env)
     raw = env.get("NERVE_ACTIONLOG_ROOTS", "")
     if raw.strip():
-        roots: list[Path] = []
-        for part in raw.split(os.pathsep):
-            part = part.strip()
-            if not part:
-                continue
-            path = Path(part).expanduser()
-            if path.is_absolute():
-                roots.append(path)
-        if roots:
+        roots = _env_actionlog_roots(raw, art_root)
+        if roots or art_root is not None:
             return roots
-    return [observability.linc_home() / "nerve" / "actionlogs"]
+    return [engagement.actionlogs_dir(env)]
 
 
 def resolve_log_path(path: str, roots: Sequence[Path] | Iterable[Path]) -> Path | str:
@@ -367,9 +384,13 @@ _APPEND_FLAGS = (
 
 def _require_regular(fd: int, path: Path) -> None:
     """Close *fd* and raise unless it is a regular file (never a FIFO / device)."""
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"not a regular file: {path}")
+    except BaseException:
         os.close(fd)
-        raise OSError(f"not a regular file: {path}")
+        raise
 
 
 def _open_append(path: Path) -> IO[str]:

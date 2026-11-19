@@ -51,6 +51,18 @@ def test_cli_screenshot_json_is_default() -> None:
         result = runner.invoke(main, ["screenshot", "DEV123"])
         assert result.exit_code == 0
         assert json.loads(result.stdout) == {"screenshot": "/tmp/x.png"}
+        mock_call.assert_called_once_with("nerve_screenshot", {"device": "DEV123"})
+
+
+def test_cli_screenshot_full_resolution() -> None:
+    runner = CliRunner()
+    with patch("linc_nerve.cli.main._call") as mock_call:
+        mock_call.return_value = {"screenshot": "/tmp/x.png"}
+        result = runner.invoke(main, ["screenshot", "DEV123", "--full-resolution"])
+        assert result.exit_code == 0
+        mock_call.assert_called_once_with(
+            "nerve_screenshot", {"device": "DEV123", "full_resolution": True}
+        )
 
 
 def test_cli_launch_success() -> None:
@@ -317,3 +329,14 @@ def test_cli_record_stop_daemon_down_is_still_daemon_unavailable(
     assert envelope["category"] == "unavailable"
     assert envelope["retryable"] is True
     assert "nerve daemon" in envelope["hint"]
+
+
+def test_contract_cli_version_prints_installed_version() -> None:
+    """[contract] `nerve --version` prints the installed package version and exits 0."""
+    import importlib.metadata
+
+    expected = importlib.metadata.version("linc-nerve")
+    result = CliRunner().invoke(main, ["--version"])
+    assert result.exit_code == 0, result.stderr or result.output
+    assert result.output.strip() == f"nerve, version {expected}"
+    assert result.stderr == ""

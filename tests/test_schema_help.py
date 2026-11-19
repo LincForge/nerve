@@ -70,7 +70,7 @@ def test_every_schema_option_has_help() -> None:
 def test_schema_covers_all_commands_and_options() -> None:
     commands = _schema()["commands"]
     options = sum(len(command["options"]) for command in commands.values())
-    assert (len(commands), options) == (54, 127)
+    assert (len(commands), options) == (54, 134)
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ def test_every_input_schema_property_has_the_args_description() -> None:
     by_name = {spec.name: spec for spec in registry_of(_registry_server())}
     for tool in _wire_tools():
         documented = parse_args_section(by_name[tool.name].fn.__wrapped__.__doc__)
-        for param, prop in tool.inputSchema.get("properties", {}).items():
+        for param, prop in tool.input_schema.get("properties", {}).items():
             assert prop.get("description") == documented[param], f"{tool.name}.{param}"
             assert prop["description"].strip(), f"{tool.name}.{param}"
 
@@ -111,7 +111,7 @@ def test_every_input_schema_property_has_the_args_description() -> None:
 
 def test_input_schema_unchanged_apart_from_descriptions() -> None:
     snapshot = json.loads(_SNAPSHOT.read_text())
-    live = {tool.name: _strip_descriptions(tool.inputSchema) for tool in _wire_tools()}
+    live = {tool.name: _strip_descriptions(tool.input_schema) for tool in _wire_tools()}
     assert sorted(live) == sorted(snapshot)
     for name, expected in snapshot.items():
         # json.dumps without sort_keys: key ORDER is part of byte-identity.

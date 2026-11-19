@@ -1,10 +1,15 @@
 """Public-facing files a stranger relies on. Content checks only — prose is reviewed by the CEO."""
 
+import json
 import re
+import shlex
 import tomllib
 from pathlib import Path
 
+from click.testing import CliRunner
+
 import linc_nerve
+from linc_nerve.cli.main import main
 
 REPO = Path(__file__).resolve().parents[1]
 PUBLIC_REPO = "https://github.com/LincForge/nerve"
@@ -234,3 +239,143 @@ def test_readme_cross_links_sibling_public_repos() -> None:
     assert "https://github.com/LincForge/crucible" in targets
     assert "https://github.com/LincForge/spectra" in targets
     assert "https://github.com/LincForge/mobile-agent-bench" in targets
+
+
+_GLOBAL_FLAGS_NO_VAL = frozenset({"--json", "--human", "--stream", "--version", "--help", "-h"})
+_GLOBAL_FLAGS_WITH_VAL = frozenset({"--output", "-o", "--timeout", "--log-level"})
+_CLI_CMD_TOKEN = re.compile(r"\A[a-z][a-z0-9-]*\Z")
+
+
+def _subcommand_from_tokens(tokens: list[str]) -> str | None:
+    """Return the first CLI subcommand token after global options, or None if none/placeholder."""
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _GLOBAL_FLAGS_WITH_VAL:
+            i += 2
+            continue
+        if any(tok.startswith(f"{flag}=") for flag in _GLOBAL_FLAGS_WITH_VAL):
+            i += 1
+            continue
+        if tok in _GLOBAL_FLAGS_NO_VAL:
+            i += 1
+            continue
+        if tok.startswith("<") or tok.startswith("["):
+            return None
+        if _CLI_CMD_TOKEN.fullmatch(tok):
+            return tok
+        return None
+    return None
+
+
+def _tokenize_snippet(snippet: str) -> list[str]:
+    try:
+        return shlex.split(snippet)
+    except ValueError:
+        return snippet.split()
+
+
+def _commands_from_command_line(text: str) -> list[str]:
+    """Extract subcommands from a shell-style command line or inline code snippet."""
+    found: list[str] = []
+    # Split shell pipelines/chains and `claude mcp add ... -- <cmd>` delimiters.
+    for segment in re.split(r"(?:&&|\|\||[;\n|]|(?<=\s)--(?=\s))", text):
+        tokens = _tokenize_snippet(segment.strip())
+        # Skip leading VAR=val assignments.
+        while tokens and "=" in tokens[0] and not tokens[0].startswith("-"):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        if tokens[0] == "uvx" and len(tokens) >= 2 and tokens[1] == "linc-nerve":
+            rest = tokens[2:]
+        elif tokens[0] in ("nerve", "linc-nerve"):
+            rest = tokens[1:]
+        else:
+            continue
+        cmd = _subcommand_from_tokens(rest)
+        if cmd is not None:
+            found.append(cmd)
+    return found
+
+
+def _extract_readme_cli_commands(readme: str) -> list[str]:
+    """Extract every CLI subcommand named with `nerve` / `linc-nerve` in README text."""
+    commands: list[str] = []
+    fence_re = re.compile(r"```([^\n]*)\n(.*?)```", re.S)
+    pos = 0
+    for match in fence_re.finditer(readme):
+        prose = readme[pos : match.start()]
+        for inline in re.findall(r"`([^`\n]+)`", prose):
+            commands.extend(_commands_from_command_line(inline))
+        lang = match.group(1).strip().lower()
+        if lang in ("", "bash", "sh", "shell", "zsh"):
+            for line in match.group(2).splitlines():
+                stripped = line.strip()
+                if stripped.startswith("$ "):
+                    stripped = stripped[2:].strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                commands.extend(_commands_from_command_line(stripped))
+        pos = match.end()
+    tail = readme[pos:]
+    for inline in re.findall(r"`([^`\n]+)`", tail):
+        commands.extend(_commands_from_command_line(inline))
+    return commands
+
+
+def test_readme_cli_commands_exist_in_schema() -> None:
+    """[contract] Every CLI command named in README.md exists in `nerve schema --json`."""
+    result = CliRunner().invoke(main, ["schema", "--json"])
+    assert result.exit_code == 0, result.stderr or result.output
+    schema_commands = set(json.loads(result.output)["commands"].keys())
+
+    named = _extract_readme_cli_commands(_readme())
+    assert named, "expected CLI commands in README.md"
+    missing = sorted(set(named) - schema_commands)
+    assert missing == [], f"README.md names CLI command(s) absent from `nerve schema`: {missing}"
+
+
+def test_readme_cli_command_extractor_flags_nonexistent_devices_command() -> None:
+    """[contract] Extractor flags nonexistent commands like `nerve devices`."""
+    sample = (
+        "Run `uvx linc-nerve devices` or `nerve --human discover` or `nerve --version`.\n"
+        "Placeholder `nerve <tool>` and `emulator -avd nerve -no-window`.\n"
+        "```bash\nclaude mcp add nerve -- uvx linc-nerve bellows\n```\n"
+    )
+    assert _extract_readme_cli_commands(sample) == ["devices", "discover", "bellows"]
+
+
+def test_readme_r6_stranger_run_fixes() -> None:
+    """[contract] README reflects R6 stranger-run fixes accurately."""
+    readme = _readme()
+    assert "DEVICE_NOT_FOUND" in readme
+    assert "nerve-output-<random>/<serial>_<NNNN>_<tool>.png" in readme
+    assert "<temp dir>/nerve-output/…png" not in readme
+    assert "com.linc.nerve-daemon" not in readme
+    assert "post_merge_kickstart.py" not in readme
+    assert "matches only by itself" not in readme
+    assert "on every transport once identity is resolved" in readme.lower()
+    assert "network transports with unknown identity" in readme.lower()
+    assert "unreadable" in readme.lower() and "warn" in readme.lower()
+    assert "positional" in readme and "--device" in readme
+    assert "With several devices attached, `devices` lists" not in readme
+
+
+def test_changelog_documents_r4_r6_molecule_after_0_2_0() -> None:
+    """[contract] CHANGELOG documents every R4/R6 fix (and cli-kit 0.3.1) above [0.2.0]."""
+    changelog = (REPO / "CHANGELOG.md").read_text()
+    headings = re.findall(r"^## \[(.+?)\].*$", changelog, re.M)
+    assert headings[0] == "Unreleased"
+    assert "## [0.3.0] - 2026-11-19" in changelog
+    since_0_2_0 = changelog.split("## [0.2.0]", 1)[0]
+    for marker in (
+        "linc-nerve-eh10",
+        "linc-nerve-56eg",
+        "linc-nerve-wp3e",
+        "linc-nerve-hih6",
+        "linc-nerve-vv14",
+        "linc-nerve-3d1y",
+        "linc-cli-kit",
+        "0.3.1",
+    ):
+        assert marker in since_0_2_0, f"CHANGELOG since 0.2.0 missing {marker}"

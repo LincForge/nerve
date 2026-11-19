@@ -42,16 +42,26 @@ from PIL import Image
 
 from linc_nerve.core import action_log, adb_health, frames, replay
 from linc_nerve.core.adb_server import adb_server_address
-from linc_nerve.core.android import AndroidController
+from linc_nerve.core.android import AndroidController, validate_launch_uri
 from linc_nerve.core.ios import IOSController
 from linc_nerve.core.observability import log_mcp_call
-from linc_nerve.mcp import _core, actionlog_tools, app_tools, input_tools, state_tools
+from linc_nerve.mcp import (
+    _core,
+    actionlog_tools,
+    app_tools,
+    input_tools,
+    navigation_tools,
+    state_tools,
+)
 from linc_nerve.mcp.actionlog_tools import (
     _nerve_actionlog_start_sync,
     _nerve_actionlog_stop_sync,
     _nerve_replay_sync,
 )
 from linc_nerve.mcp.navigation_tools import _nerve_navigate_sync
+
+_REAL_SUBPROCESS_RUN = subprocess.run
+_REAL_SUBPROCESS_POPEN = subprocess.Popen
 
 # http_router resolves the served git sha at import (``git rev-parse``): import it
 # here with that one subprocess stubbed, so no test reaches a real process.
@@ -138,6 +148,30 @@ def _recording_android(shell_output: str | dict[str, str] = "") -> AndroidContro
 
 def _shell_cmds(ctrl: AndroidController) -> list[str]:
     return [c.args[1] for c in ctrl._shell.call_args_list]  # type: ignore[attr-defined]
+
+
+def _sh_tokenize(cmd: str) -> list[str]:
+    """Re-tokenize *cmd* with the local ``/bin/sh`` (not ``shlex.split``).
+
+    Prepends ``printf "%s\\n" `` so the shell's own word-splitting, command
+    substitution (``$(...)``), and control operators (``;``, ``&``) run over
+    *cmd* just as they would in the device shell, returning one argv token per
+    output line. Restores ``subprocess.Popen`` only for this assertion helper
+    so the ``_tripwire`` fixture stays armed for every ``src/`` call.
+
+    WARNING: This helper REALLY executes *cmd* on the CI host's ``/bin/sh`` if
+    quoting regresses, so payloads must stay benign (``id``, ``true``, plain
+    words) — never ``reboot``, ``rm``, ``curl``, redirections, or anything that
+    writes.
+    """
+    with patch.object(subprocess, "Popen", _REAL_SUBPROCESS_POPEN):
+        result = _REAL_SUBPROCESS_RUN(
+            ["/bin/sh", "-c", 'printf "%s\\n" ' + cmd],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    return [line for line in result.stdout.split("\n") if line != ""]
 
 
 class FakeIOS:
@@ -467,6 +501,81 @@ def test_c3_hostile_launch_package_and_uri(root: Path) -> None:
     # refused before the shell string is built, instead of only being quoted.
     assert bad_uri["outcome"] == "diverged" and "Invalid uri" in bad_uri["reason"]
     assert cmds_uri == []
+
+
+# WARNING: _sh_tokenize REALLY executes the command on the CI host's /bin/sh if
+# quoting regresses, so payloads must stay benign (id, true, plain words) —
+# never reboot, rm, curl, redirections, or anything that writes.
+@pytest.mark.parametrize("uri", ["x://$(id)", "x://a;b&c", "x://a';id;'"])
+def test_c3_grammar_valid_metachar_uri_reaches_shell_as_one_literal_token(
+    root: Path, monkeypatch: pytest.MonkeyPatch, uri: str
+) -> None:
+    """linc-nerve-4bw4 / linc-nerve-uqdy: RFC 3986 sub-delims ``$()``, ``;``,
+    ``&``, ``'`` pass the URI grammar and must survive local ``/bin/sh``
+    re-tokenization of the command nerve sends across launch, navigate, and
+    replay as one byte-identical token.
+    """
+    validate_launch_uri(uri)
+    monkeypatch.setitem(navigation_tools._ROUTE_REGISTRY, "precisionlevel", {"deep": uri})
+    ctrl = _recording_android()
+    with _device(ctrl):
+        launched = app_tools._nerve_launch_sync(SERIAL, TARGET, uri=uri)
+        launched_bare = app_tools._nerve_launch_sync(SERIAL, "", uri=uri)
+        navigated = _nerve_navigate_sync(SERIAL, "precisionlevel", "deep")
+    replayed, replay_cmds = _replay_lines(
+        root, _action(1, "nerve_launch", {"package": TARGET, "uri": uri})
+    )
+
+    assert launched["success"] is True
+    assert launched_bare["success"] is True
+    assert navigated["success"] is True
+    assert replayed["outcome"] == "completed"
+    launch_cmd, bare_cmd, nav_cmd = _shell_cmds(ctrl)
+    for cmd, expected_tail in (
+        (launch_cmd, [uri, TARGET]),
+        (bare_cmd, [uri]),
+        (nav_cmd, [uri, "com.lincmobile.level"]),
+        (replay_cmds[0], [uri, TARGET]),
+    ):
+        tokens = _sh_tokenize(cmd)
+        assert tokens == [
+            "am",
+            "start",
+            "-a",
+            "android.intent.action.VIEW",
+            "-d",
+            *expected_tail,
+        ]
+        assert tokens.count(uri) == 1
+
+
+@pytest.mark.parametrize(
+    "bad_uri",
+    ["x://$(id)\n", "x://a;b&c\n", "x://ok\n", "x://ok\r", "x://ok\nreboot"],
+)
+def test_c3_trailing_newline_uri_rejected_by_validator_fullmatch(
+    root: Path, monkeypatch: pytest.MonkeyPatch, bad_uri: str
+) -> None:
+    """linc-nerve-4bw4: a URI with a trailing newline is rejected by the
+    validator (fullmatch) and never reaches the device shell.
+    """
+    with pytest.raises(ValueError, match="RFC 3986"):
+        validate_launch_uri(bad_uri)
+
+    monkeypatch.setitem(navigation_tools._ROUTE_REGISTRY, "precisionlevel", {"deep": bad_uri})
+    ctrl = _recording_android()
+    with _device(ctrl):
+        launched = app_tools._nerve_launch_sync(SERIAL, TARGET, uri=bad_uri)
+        navigated = _nerve_navigate_sync(SERIAL, "precisionlevel", "deep")
+    replayed, replay_cmds = _replay_lines(
+        root, _action(1, "nerve_launch", {"package": TARGET, "uri": bad_uri})
+    )
+
+    assert "error" in launched and "Invalid uri" in launched["error"]
+    assert "error" in navigated and "Invalid uri" in navigated["error"]
+    assert replayed["outcome"] == "diverged" and "Invalid uri" in replayed["reason"]
+    assert _shell_cmds(ctrl) == []
+    assert replay_cmds == []
 
 
 @pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 0.0, -1.0, 120.5])

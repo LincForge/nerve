@@ -146,7 +146,13 @@ def _nerve_navigate_screenshot_sync(
         settle_ms: Milliseconds to wait after navigation before screenshot (default 500).
         annotate: If true, overlay numbered bounding boxes on UI elements.
     """
+    from linc_nerve.core.state_engine import validate_idle_timeout_ms
     from linc_nerve.mcp.screenshot_tools import _nerve_screenshot_sync
+
+    try:
+        validate_idle_timeout_ms(settle_ms, name="settle_ms")
+    except ValueError as exc:
+        return {"error": str(exc), "validation_error": True}
 
     nav_result = _nerve_navigate_sync(device, app_id, route_id)
     if "error" in nav_result:
@@ -165,9 +171,10 @@ def _nerve_navigate_screenshot_sync(
         if _core._metrics is not None:
             _core._metrics.record_screenshot(device)
 
+        from linc_nerve.core.engagement import write_private_bytes
+
         path = _core._next_output_path(device, "screenshot")
-        with open(path, "wb") as f:
-            f.write(data)
+        write_private_bytes(path, data)
 
         return _build_nav_screenshot_result(
             app_id,

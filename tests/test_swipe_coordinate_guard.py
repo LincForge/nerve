@@ -280,6 +280,7 @@ def test_unsessioned_integer_string_swipe_still_runs(ctrl: FakeController) -> No
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("restore_signal_handlers")
 def test_cli_schema_types_swipe_coordinates_as_int() -> None:
     import json
 
@@ -292,6 +293,7 @@ def test_cli_schema_types_swipe_coordinates_as_int() -> None:
         assert options[name]["type"] == "INT", name
 
 
+@pytest.mark.usefixtures("restore_signal_handlers")
 @pytest.mark.parametrize("flag", ["--start-x", "--x1"])
 def test_cli_rejects_non_integer_swipe_coordinate(flag: str) -> None:
     from linc_nerve.cli.main import main
